@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+.streamlit/
+*.db
+*.tmp.*
+.DS_Store
+.env

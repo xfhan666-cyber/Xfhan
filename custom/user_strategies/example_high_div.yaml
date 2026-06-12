@@ -1,0 +1,38 @@
+strategy_name: "高股息防守策略"
+description: "筛选高股息率、低估值、低波动的防守型股票，适合震荡市"
+
+conditions:
+  must_include:
+    - "dividend_yield > 3"
+    - "daily_volume > 20000000"
+    - "pe_ratio < 20"
+    - "pe_ratio > 0"
+    - "is_st == false"
+
+  ranking_factors:
+    - field: "dividend_yield"
+      weight: 40
+      order: "desc"
+    - field: "volatility_60d"
+      weight: 30
+      order: "asc"
+    - field: "roe"
+      weight: 20
+      order: "desc"
+    - field: "market_cap"
+      weight: 10
+      order: "desc"
+
+  position:
+    max_stocks: 10
+    single_weight: "equal"
+    max_single_pct: 15
+
+  rebalance:
+    frequency: "monthly"
+    day_of_month: 1
+
+  risk_control:
+    stop_loss_pct: 8
+    stop_profit_pct: 25
+    max_drawdown_portfolio: 15

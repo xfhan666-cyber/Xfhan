@@ -1,0 +1,270 @@
+"""
+A股量化选股系统 - 早盘一键扫描版
+"""
+import os
+for v in ['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']:
+    os.environ.pop(v, None)
+os.environ['no_proxy'] = '*'
+
+import requests
+_orig = requests.Session.__init__
+def _patched(self, *a, **kw):
+    _orig(self, *a, **kw)
+    self.trust_env = False
+requests.Session.__init__ = _patched
+
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import time
+
+st.set_page_config(page_title="A股量化选股", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+st.markdown("""<style>
+    .stApp { background: #0f172a; color: #e2e8f0; }
+    [data-testid="stSidebar"] { display: none !important; }
+    [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+    #MainMenu, footer, header { display: none !important; }
+    .stTabs [data-baseweb="tab"] { background: #1e293b; color: #94a3b8; border-radius: 8px 8px 0 0; padding: 8px 14px; font-weight: 600; border: 1px solid #334155; border-bottom: none; }
+    .stTabs [aria-selected="true"] { background: #1e40af; color: white; border-color: #3b82f6; }
+    .big-button > button { font-size: 1.2rem !important; padding: 16px 40px !important; background: #ef4444 !important; font-weight: 800 !important; }
+    .stButton > button { background: #3b82f6; color: white; border: none; border-radius: 8px; padding: 8px 20px; font-weight: 700; }
+    .stButton > button:hover { background: #2563eb; }
+    .metric-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; text-align: center; }
+    .metric-value { font-size: 1.2rem; font-weight: 800; color: #f8fafc; }
+    .metric-label { font-size: 0.7rem; color: #94a3b8; }
+    .signal-row { background: #1e293b; border-left: 3px solid #ef4444; border-radius: 0 8px 8px 0; padding: 10px 14px; margin: 6px 0; }
+    [data-testid="stDataFrame"] th { background: #1e293b; color: #94a3b8; font-size: 0.8rem; }
+</style>""", unsafe_allow_html=True)
+
+# ============ 数据加载 ============
+@st.cache_data(ttl=600, show_spinner="正在获取A股实时数据...")
+def load_data():
+    from data.fetcher import fetcher
+    r = {'market': None, 'index': None, 'overview': {}, 'time': ''}
+    t0 = time.time()
+    df = fetcher.get_realtime_all_stocks()
+    if df is not None and not df.empty:
+        r['market'] = df
+        r['time'] = datetime.now().strftime('%H:%M:%S')
+    try:
+        idx = fetcher.get_index_realtime()
+        if not idx.empty and 'name' in idx.columns:
+            r['index'] = idx.drop_duplicates(subset=['name'], keep='first')
+    except Exception: pass
+    try: r['overview'] = fetcher.get_market_overview()
+    except Exception: pass
+    return r
+
+def run_all_strategies(market_data):
+    """运行全部7个策略，返回合并信号"""
+    from strategies.multi_factor import MultiFactorStrategy
+    from strategies.pb_roe import PBROEStrategy
+    from strategies.trend_momentum import TrendMomentumStrategy
+    from strategies.mean_reversion import MeanReversionStrategy
+    from strategies.smallcap_growth import SmallCapGrowthStrategy
+    from strategies.first_board import FirstBoardStrategy
+    from strategies.limit_up import LimitUpStrategy
+    from config import DEFAULT_STRATEGY_PARAMS
+
+    strategies = [
+        MultiFactorStrategy(DEFAULT_STRATEGY_PARAMS.get('multi_factor')),
+        PBROEStrategy(DEFAULT_STRATEGY_PARAMS.get('pb_roe')),
+        TrendMomentumStrategy(DEFAULT_STRATEGY_PARAMS.get('trend_momentum')),
+        MeanReversionStrategy(DEFAULT_STRATEGY_PARAMS.get('mean_reversion')),
+        SmallCapGrowthStrategy(DEFAULT_STRATEGY_PARAMS.get('smallcap_growth')),
+        LimitUpStrategy(DEFAULT_STRATEGY_PARAMS.get('limit_up')),
+        FirstBoardStrategy(DEFAULT_STRATEGY_PARAMS.get('first_board')),
+    ]
+    all_signals = []
+    for s in strategies:
+        try:
+            s.set_market_data(market_data)
+            result = s.run()
+            all_signals.extend(result.signals)
+        except Exception:
+            pass
+
+    # 合并同股票信号（多策略共识提升置信度）
+    merged = {}
+    for sig in all_signals:
+        if sig.code not in merged:
+            merged[sig.code] = sig
+        else:
+            merged[sig.code].confidence = min(98, merged[sig.code].confidence + 5)
+            merged[sig.code].reason += f' | +{sig.strategy}'
+    result = sorted(merged.values(), key=lambda x: x.confidence, reverse=True)
+    return result
+
+# ============ 主界面 ============
+data = load_data()
+st.session_state.market_data = data['market']
+st.session_state.index_data = data['index']
+st.session_state.overview = data['overview']
+
+market_ok = data['market'] is not None and not data['market'].empty
+n = len(data['market']) if market_ok else 0
+
+st.markdown(f"""
+<div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-bottom:2px solid #3b82f6;padding:10px 20px;display:flex;justify-content:space-between;align-items:center">
+    <h1 style="font-size:1.2rem;color:#fbbf24;margin:0">📈 A股量化选股</h1>
+    <span style="color:#94a3b8;font-size:0.8rem">{'✅' if market_ok else '⚠️'} {n}只股票 | {data.get('time','加载中')}</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ============ 三个Tab：扫描 · 回顾 · 帮助 ============
+t1, t2, t3 = st.tabs(["⚡ 早盘扫描", "📊 大盘概览", "📖 使用帮助"])
+
+# ===== Tab 1: 早盘扫描（核心功能）=====
+with t1:
+    st.markdown("### ⚡ 一键扫描今日机会")
+
+    if not market_ok:
+        st.error("数据加载中，请稍候刷新...")
+    else:
+        # 大盘状态速览
+        overview = data.get('overview', {})
+        idx_data = data.get('index')
+        if idx_data is not None and not idx_data.empty:
+            cols = st.columns(len(idx_data))
+            for i, (_, row) in enumerate(idx_data.iterrows()):
+                pct = row.get('pct_change', 0)
+                color = '#ef4444' if pct > 0 else '#10b981' if pct < 0 else '#94a3b8'
+                with cols[i]:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">{row['name']}</div>
+                        <div class="metric-value" style="font-size:1rem">{row['price']:.0f}</div>
+                        <div style="color:{color};font-size:0.8rem;font-weight:700">{'+' if pct>0 else ''}{pct:.2f}%</div>
+                    </div>""", unsafe_allow_html=True)
+
+        st.divider()
+
+        # 大盘环境判断
+        if overview:
+            up_ratio = overview.get('up', 0) / max(overview.get('total', 1), 1) * 100
+            limit_up = overview.get('limit_up', 0)
+            if up_ratio > 60 and limit_up > 50:
+                env_label = '🟢 强势市场 — 适合趋势动量、首板打板、小盘成长'
+            elif up_ratio > 40:
+                env_label = '🟡 震荡市场 — 适合多因子综合、PB-ROE价值'
+            elif up_ratio > 20:
+                env_label = '🟠 弱势市场 — 适合超跌反弹、PB-ROE防御'
+            else:
+                env_label = '🔴 极端弱势 — 建议空仓观望，或仅看超跌反弹'
+            st.info(f"**大盘环境**: {env_label} | 上涨{overview.get('up',0)}家 下跌{overview.get('down',0)}家 涨停{limit_up}家 成交{overview.get('total_amount',0):.0f}亿")
+
+        # 一键扫描按钮
+        if st.button("🚀 一键扫描今日买入机会", type="primary", use_container_width=True):
+            with st.spinner("正在运行7个策略分析全市场，大约需要30秒..."):
+                signals = run_all_strategies(data['market'])
+
+            if not signals:
+                st.warning("今日无符合条件的买入信号。当前市场环境不适合出击，空仓也是策略。")
+            else:
+                st.success(f"扫描完成！发现 {len(signals)} 个买入机会")
+
+                # 按置信度分档展示
+                strong = [s for s in signals if s.confidence >= 75]
+                medium = [s for s in signals if 55 <= s.confidence < 75]
+                weak = [s for s in signals if s.confidence < 55]
+
+                if strong:
+                    st.subheader(f"🔥 强信号 ({len(strong)}个) — 重点考虑")
+                    for s in strong[:10]:
+                        multi = '多策略共识' if '|' in s.reason else '单策略推荐'
+                        st.markdown(f"""<div class="signal-row">
+                            <div style="display:flex;justify-content:space-between">
+                                <span><strong style="font-size:1.1rem">{s.name}</strong> <span style="color:#94a3b8">{s.code}</span></span>
+                                <span style="color:#ef4444;font-weight:800">{s.confidence:.0f}% {multi}</span>
+                            </div>
+                            <div style="margin-top:4px;font-size:0.85rem;color:#cbd5e1">
+                                买入价: <strong style="color:#fbbf24">{s.price}</strong> |
+                                止损: <strong style="color:#ef4444">{s.stop_loss}</strong> |
+                                止盈: <strong style="color:#10b981">{s.stop_profit}</strong>
+                            </div>
+                            <div style="font-size:0.78rem;color:#94a3b8;margin-top:2px">📝 {s.reason}</div>
+                        </div>""", unsafe_allow_html=True)
+
+                if medium:
+                    with st.expander(f"🟡 中等信号 ({len(medium)}个) — 可参考"):
+                        for s in medium[:15]:
+                            st.markdown(f"""<div class="signal-row" style="border-left-color:#f59e0b">
+                                <strong>{s.name} ({s.code})</strong> {s.confidence:.0f}% |
+                                买{s.price} 止{s.stop_loss} 盈{s.stop_profit} | {s.reason[:80]}
+                            </div>""", unsafe_allow_html=True)
+
+        else:
+            st.info("👆 点击上方按钮开始扫描。系统会自动运行7个策略，综合给出今日推荐。")
+
+# ===== Tab 2: 大盘概览 =====
+with t2:
+    st.subheader("📊 市场数据")
+    if market_ok:
+        df = data['market']
+        st.caption(f"共{len(df)}只股票 | 更新时间{data.get('time','')}")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**涨幅榜Top15**")
+            dc = ['code','name','price','pct_change'] if all(c in df.columns for c in ['code','name','price','pct_change']) else None
+            if dc:
+                st.dataframe(df.nlargest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
+        with col_b:
+            st.markdown("**跌幅榜Top15**")
+            if dc:
+                st.dataframe(df.nsmallest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
+
+        if 'pct_change' in df.columns:
+            bins = [-100, -9.9, -5, -3, -1, 0, 1, 3, 5, 9.9, 100]
+            labels = ['跌停','-5~-10%','-3~-5%','-1~-3%','0~-1%','0~+1%','+1~3%','+3~5%','+5~10%','涨停']
+            df['rng'] = pd.cut(df['pct_change'], bins=bins, labels=labels)
+            dist = df['rng'].value_counts().reindex(labels, fill_value=0)
+            st.bar_chart(pd.DataFrame({'区间':labels,'数量':dist.values}).set_index('区间'), use_container_width=True)
+    else:
+        st.warning("数据加载中...")
+
+# ===== Tab 3: 使用帮助 =====
+with t3:
+    st.markdown("""
+    ## 📖 使用说明
+
+    ### 你只需要做这些
+    ```
+    1. 每个交易日 9:25 后打开本系统
+    2. 点「⚡ 早盘扫描」→ 点「一键扫描」
+    3. 查看强信号（🔥标记），选2-3只你熟悉的
+    4. 打开券商APP，设好条件单：
+       - 买入价 = 系统建议价
+       - 止损价 = 系统止损价（必须设！）
+       - 止盈价 = 系统止盈价
+    5. 关掉系统，该干嘛干嘛
+    ```
+
+    ### 信号怎么看
+    - 🔥 **75%以上**：强信号，多策略共识，重点考虑
+    - 🟡 **55-75%**：中等信号，结合自己判断
+    - ❌ **55%以下**：弱信号，忽略
+
+    ### 大盘环境自动判断
+    系统会根据涨跌比和涨停数量自动告诉你今天适合什么策略：
+    - 🟢 强势 → 适合趋势、打板
+    - 🟡 震荡 → 适合多因子、价值
+    - 🟠 弱势 → 适合超跌反弹、防御
+    - 🔴 极端 → 建议空仓
+
+    ### 核心原则
+    1. **每天最多只做2-3只**，别贪多
+    2. **止损必须设**，亏3%就认，别扛
+    3. **次日开盘检查**昨天的单子有没有触发
+    4. **市场不好时空仓**，不买也是赚钱
+
+    ### 常见问题
+    **Q: 为什么有时候扫不出股票？**
+    市场不好，策略全都判断不适合买入。这是对的——强行买才是错的。
+
+    **Q: 需要一直开着吗？**
+    不需要。开盘扫一次，设好条件单就关。你在券商设的条件单会自动执行。
+
+    **Q: 回测、自定义策略在哪？**
+    高级功能入口在左侧保留。日常使用只需要「早盘扫描」这一个页面。
+    """)
