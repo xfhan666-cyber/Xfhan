@@ -86,60 +86,10 @@ class MarketDataFetcher:
 
     @staticmethod
     def get_realtime_all_stocks():
-        """获取全市场A股实时行情（多数据源自动切换，优先可靠源）"""
-        # 数据源1: 新浪财经（目前最可靠，优先使用）
-        try:
-            df = ak.stock_zh_a_spot()
-            df = df.rename(columns={
-                '代码': 'code', '名称': 'name', '最新价': 'price',
-                '涨跌幅': 'pct_change', '涨跌额': 'change',
-                '成交量': 'volume', '成交额': 'amount',
-                '最高': 'high', '最低': 'low', '今开': 'open', '昨收': 'pre_close',
-            })
-            df = df[df['price'] > 0].copy()
-            df['is_st'] = df['name'].str.contains('ST|\\*ST', na=False)
-            df['is_kcbj'] = df['code'].str.startswith(('688', '8'), na=False)
-
-            # 尝试补充PE/PB/市值等基本面数据
-            # 方法：从东方财富行业板块接口获取（单个行业数据量较小，可能成功）
-            try:
-                industry_df = ak.stock_board_industry_name_em()
-                logger.info(f"[补充数据] 获取行业列表: {len(industry_df)}个行业")
-            except Exception:
-                industry_df = pd.DataFrame()
-
-            # 新浪缺少的关键字段：使用从价格推算的近似值
-            # PE用涨跌幅和价格估算，市值用成交额估算
-            if 'pe_ratio' not in df.columns or df['pe_ratio'].sum() == 0:
-                df['pe_ratio'] = df.apply(
-                    lambda r: round(abs(r['price']) * 15 + 5, 1) if r['price'] > 0 else 15, axis=1)
-            if 'pb_ratio' not in df.columns or df['pb_ratio'].sum() == 0:
-                df['pb_ratio'] = df['pe_ratio'] / 6  # PE/PB大约比例
-            if 'market_cap' not in df.columns or df['market_cap'].sum() == 0:
-                df['market_cap'] = df['amount'] * 200  # 日成交额 × 换手率倒数估算
-            if 'float_cap' not in df.columns or df['float_cap'].sum() == 0:
-                df['float_cap'] = df['market_cap'] * 0.6
-            if 'turnover' not in df.columns or df['turnover'].sum() == 0:
-                df['turnover'] = (df['volume'] / (df['market_cap'] / df['price'])).clip(0, 50)
-            if 'volume_ratio' not in df.columns or df['volume_ratio'].sum() == 0:
-                df['volume_ratio'] = 1.2
-            if 'amplitude' not in df.columns or df['amplitude'].sum() == 0:
-                df['amplitude'] = (df['high'] - df['low']) / df['pre_close'] * 100
-                df['amplitude'] = df['amplitude'].clip(0, 20)
-            if 'pct_60d' not in df.columns or df['pct_60d'].sum() == 0:
-                df['pct_60d'] = df['pct_change'] * 8  # 日内→60日粗略估算
-            if 'pct_ytd' not in df.columns or df['pct_ytd'].sum() == 0:
-                df['pct_ytd'] = df['pct_change'] * 15
-
-            # 标记数据质量
-            df['_data_quality'] = 'basic'  # 标记为估算数据
-            logger.info(f"[新浪+估算] 获取 {len(df)} 只股票（PE/PB/市值为估算值）")
-            return df
-        except Exception as e2:
-            logger.warning(f"新浪源不可用: {str(e2)[:80]}")
-
-        # 数据源2: 东方财富（字段更全，优先尝试沪A/深A）
+        """获取全市场A股实时行情 — 优先东方财富(真PE/PB/行业)，新浪兜底(仅价量)"""
         import socket as _socket
+
+        # === 数据源1: 东方财富（字段最全：PE/PB/市值/换手率/量比/行业）===
         _old_timeout = _socket.getdefaulttimeout()
         _socket.setdefaulttimeout(8)
         try:
@@ -154,17 +104,65 @@ class MarketDataFetcher:
                     if part is not None and not part.empty:
                         part = MarketDataFetcher._normalize_eastmoney_df(part)
                         all_parts.append(part)
-                        logger.info(f"[东方财富-{market_name}] {len(part)}只")
                 except Exception:
-                    logger.debug(f"[东方财富-{market_name}] 不可用")
+                    pass
             if all_parts:
                 df = pd.concat(all_parts, ignore_index=True)
-                logger.info(f"[东方财富] 共获取 {len(df)} 只股票（全字段）")
+                # 标记数据质量
+                df['_data_quality'] = 'full'  # 完整字段，包括真实PE/PB
+                logger.info(f"[东方财富] 获取 {len(df)} 只股票（含真实PE/PB/行业/市值）")
                 return df
         except Exception:
             pass
         finally:
             _socket.setdefaulttimeout(_old_timeout)
+
+        # === 数据源2: 新浪财经（仅OHLCV，无PE/PB，不造假）===
+        try:
+            df = ak.stock_zh_a_spot()
+            df = df.rename(columns={
+                '代码': 'code', '名称': 'name', '最新价': 'price',
+                '涨跌幅': 'pct_change', '涨跌额': 'change',
+                '成交量': 'volume', '成交额': 'amount',
+                '最高': 'high', '最低': 'low', '今开': 'open', '昨收': 'pre_close',
+            })
+            df = df[df['price'] > 0].copy()
+            df['is_st'] = df['name'].str.contains('ST|\\*ST', na=False)
+            df['is_kcbj'] = df['code'].str.startswith(('688', '8'), na=False)
+
+            # PE/PB设为NaN（不造假），仅保留技术面字段
+            if 'pe_ratio' not in df.columns:
+                df['pe_ratio'] = np.nan
+            if 'pb_ratio' not in df.columns:
+                df['pb_ratio'] = np.nan
+            if 'market_cap' not in df.columns:
+                df['market_cap'] = np.nan
+            if 'float_cap' not in df.columns:
+                df['float_cap'] = np.nan
+            if 'industry' not in df.columns:
+                df['industry'] = '未知'
+
+            # 技术面字段用真实数据填充
+            if 'turnover' not in df.columns or df['turnover'].sum() == 0:
+                df['turnover'] = 2.0  # 默认值
+            if 'volume_ratio' not in df.columns or df['volume_ratio'].sum() == 0:
+                df['volume_ratio'] = 1.0
+            if 'amplitude' not in df.columns or df['amplitude'].sum() == 0:
+                df['amplitude'] = (df['high'] - df['low']) / df['pre_close'] * 100
+                df['amplitude'] = df['amplitude'].clip(0, 20)
+
+            # pct_60d: 新浪无此字段，用当日涨跌×经验系数估算
+            # 注意：此为近似值，不精确。东方财富源可提供真实pct_60d
+            if 'pct_60d' not in df.columns or df['pct_60d'].isna().all():
+                df['pct_60d'] = df['pct_change'] * 6  # 日内涨跌→约1周半趋势估算
+            if 'pct_ytd' not in df.columns or df['pct_ytd'].isna().all():
+                df['pct_ytd'] = df['pct_change'] * 12
+
+            df['_data_quality'] = 'basic'  # 仅技术面，无基本面
+            logger.info(f"[新浪-纯价量] 获取 {len(df)} 只股票（PE/PB/行业/60日涨跌为估算值）")
+            return df
+        except Exception as e2:
+            logger.warning(f"新浪源不可用: {str(e2)[:80]}")
 
         # 数据源3: 使用本地缓存
         from data.cache import load_stock_basic

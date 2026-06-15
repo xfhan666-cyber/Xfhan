@@ -186,10 +186,17 @@ with t1:
             market_df = st.session_state.market_data
 
         if market_df is None or market_df.empty:
-            st.error("❌ 数据获取失败，请检查网络后点击刷新重试")
+            st.error("数据获取失败，请检查网络后点击刷新重试")
         else:
+            # 数据质量提示
+            dq = market_df['_data_quality'].iloc[0] if '_data_quality' in market_df.columns else 'unknown'
+            if dq == 'basic':
+                st.warning("当前使用新浪数据源（仅价量数据）。趋势动量可正常工作，超跌反弹为估算值，PB-ROE需东方财富数据源。建议交易时段使用以获得完整数据。")
+            elif dq == 'full':
+                st.success("东方财富数据源已连接，基本面+技术面数据完整")
+
             # Step 2: 运行策略
-            with st.spinner("🔍 正在运行3大核心策略分析全市场..."):
+            with st.spinner("正在运行3大核心策略分析全市场..."):
                 signals = run_core_strategies(market_df)
 
             if not signals:
