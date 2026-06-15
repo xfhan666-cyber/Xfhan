@@ -188,26 +188,94 @@ with t1:
         if market_df is None or market_df.empty:
             st.error("数据获取失败，请检查网络后点击刷新重试")
         else:
-            # 数据质量提示
             dq = market_df['_data_quality'].iloc[0] if '_data_quality' in market_df.columns else 'unknown'
-            if dq == 'basic':
-                st.warning("当前使用新浪数据源（仅价量数据）。趋势动量可正常工作，超跌反弹为估算值，PB-ROE需东方财富数据源。建议交易时段使用以获得完整数据。")
-            elif dq == 'full':
-                st.success("东方财富数据源已连接，基本面+技术面数据完整")
 
-            # Step 2: 运行策略
-            with st.spinner("正在运行3大核心策略分析全市场..."):
+            # ====== Layer 1: 市场温度计 ======
+            from market.market_regime import regime_detector
+            regime = regime_detector.detect(market_df)
+
+            # ====== Layer 2: 板块轮动 ======
+            from market.sector_rotation import sector_analyzer
+            sector_result = sector_analyzer.analyze(market_df)
+
+            # ====== 显示市场环境 ======
+            st.markdown(f"""
+            <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;margin:10px 0">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-size:1.3rem">{regime.status_emoji} <strong>{regime.status}</strong></span>
+                    <span style="color:#94a3b8">评分 {regime.score}/100</span>
+                </div>
+                <div style="margin-top:8px;display:flex;gap:20px;color:#94a3b8;font-size:0.85rem">
+                    <span>涨跌比: <strong style="color:{'#ef4444' if regime.breadth > 50 else '#10b981'}">{regime.breadth}%上涨</strong></span>
+                    <span>涨停: <strong style="color:#ef4444">{regime.limit_up_count}家</strong></span>
+                    <span>跌停: <strong style="color:#10b981">{regime.limit_down_count}家</strong></span>
+                    <span>成交: <strong>{regime.total_amount:.0f}亿</strong></span>
+                    <span>恐惧贪婪: <strong>{regime.fear_greed_index}/100</strong></span>
+                </div>
+                <div style="margin-top:8px;padding:6px 10px;background:#0f172a;border-radius:6px">
+                    <span style="color:#fbbf24">💡 建议仓位: <strong>{regime.suggested_position*100:.0f}%</strong></span>
+                    <span style="color:#94a3b8;margin-left:16px">{'; '.join(regime.advice)}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ====== 显示主线板块 ======
+            if sector_result.main_themes:
+                theme_html = ' '.join(
+                    f'<span style="background:#1e40af;color:#93c5fd;padding:4px 10px;border-radius:12px;margin:2px;font-size:0.8rem">{s.name} ({s.pct_change:+.1f}%)</span>'
+                    for s in sector_result.main_themes[:8]
+                )
+                st.markdown(f"""
+                <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px;margin:8px 0">
+                    <span style="color:#fbbf24;font-weight:700">主线板块: </span>{theme_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+            if sector_result.ai_tech_sectors:
+                ai_html = ' '.join(
+                    f'<span style="background:#1e3a5f;color:#60a5fa;padding:3px 8px;border-radius:10px;margin:1px;font-size:0.75rem">{s.name}</span>'
+                    for s in sector_result.ai_tech_sectors[:6]
+                )
+                st.markdown(f"""
+                <div style="background:#0f172a;border:1px solid #1e40af;border-radius:8px;padding:8px;margin:6px 0">
+                    <span style="color:#60a5fa">🤖 AI/科技相关: </span>{ai_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+            # 数据质量
+            if dq == 'basic':
+                st.caption("当前新浪数据源（仅价量）。趋势动量可用，超跌反弹估算，PB-ROE暂不可用。交易时段通常自动切换到东方财富。")
+
+            # ====== Layer 3: 运行策略 + 动态仓位 ======
+            with st.spinner("正在运行3大核心策略..."):
                 signals = run_core_strategies(market_df)
 
             if not signals:
-                st.warning("今日无符合条件的买入信号。当前市场环境不适合出击，空仓也是策略。")
+                st.warning(f"今日无符合条件的买入信号。当前{regime.status}，空仓也是策略。")
+                if regime.sentiment == 'fearful':
+                    st.info("市场处于冰点，别人恐惧我贪婪——可以关注超跌标的，小仓位试探。")
             else:
-                # Step 3: 仓位分配
+                # 动态仓位调整：市场建议仓位 × 风险偏好系数
+                position_multiplier = {
+                    'conservative': 0.7, 'moderate': 1.0, 'aggressive': 1.3
+                }.get(risk_level, 1.0)
+                effective_capital = total_capital * regime.suggested_position * position_multiplier
+
                 from portfolio.allocator import PortfolioAllocator
-                allocator = PortfolioAllocator(total_capital=total_capital)
+                allocator = PortfolioAllocator(total_capital=effective_capital)
                 plan = allocator.allocate(signals, risk_level=risk_level)
 
-                st.success(f"扫描完成！3大策略共发现 {len(signals)} 个信号 → 精选 {len(plan.allocations)} 只")
+                # 如果主线板块有股票，优先展示
+                main_theme_codes = set(sector_result.hot_stocks) if sector_result.hot_stocks else set()
+                theme_tagged = []
+                for a in plan.allocations:
+                    in_theme = a.stock.code in main_theme_codes
+                    theme_tagged.append(in_theme)
+
+                st.success(
+                    f"扫描完成！市场{regime.status} → 建议仓位{regime.suggested_position*100:.0f}% → "
+                    f"有效资金¥{effective_capital:,.0f} → 精选{len(plan.allocations)}只"
+                )
 
                 # 显示使用的策略信息
                 with st.expander("📊 本次扫描使用的策略及依据", expanded=False):
@@ -231,7 +299,9 @@ with t1:
                         consensus_badge = f'🏅{strategy_count}策略共识' if strategy_count >= 2 else '单策略'
                         strat_key = s.factors.get('strategy_key', '')
                         risk_badge = s.factors.get('risk_level', '')
-                        st.markdown(f"""<div class="signal-row">
+                        in_main_theme = s.code in main_theme_codes
+                        theme_badge = '<span style="background:#7c3aed;color:#c4b5fd;font-size:0.65rem;padding:1px 5px;border-radius:3px;margin-left:4px">主线板块</span>' if in_main_theme else ''
+                        st.markdown(f"""<div class="signal-row" style="{'border-left: 3px solid #7c3aed;' if in_main_theme else ''}">
                             <div style="display:flex;justify-content:space-between;align-items:center">
                                 <span>
                                     <strong style="font-size:1.15rem">#{i} {s.name}</strong>
@@ -240,6 +310,7 @@ with t1:
                                     <span style="color:#10b981;font-size:0.75rem;margin-left:4px"> {consensus_badge}</span>
                                     <span style="background:#1e40af;color:#93c5fd;font-size:0.7rem;padding:2px 6px;border-radius:4px;margin-left:4px">{strat_key}</span>
                                     <span style="font-size:0.7rem;margin-left:4px">{risk_badge}</span>
+                                    {theme_badge}
                                 </span>
                             </div>
                             <div style="margin-top:6px;font-size:0.85rem;color:#cbd5e1;display:flex;gap:20px;flex-wrap:wrap">
