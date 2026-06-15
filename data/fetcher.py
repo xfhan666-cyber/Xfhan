@@ -86,31 +86,8 @@ class MarketDataFetcher:
 
     @staticmethod
     def get_realtime_all_stocks():
-        """获取全市场A股实时行情（分批请求+多数据源自动切换）"""
-        # 数据源1: 东方财富 - 按市场分批请求（减小单次请求数据量）
-        all_parts = []
-        eastmoney_ok = False
-        for market_func, market_name in [
-            (ak.stock_sh_a_spot_em, '沪A'),
-            (ak.stock_sz_a_spot_em, '深A'),
-            (ak.stock_bj_a_spot_em, '京A'),
-        ]:
-            try:
-                part = market_func()
-                if part is not None and not part.empty:
-                    part = MarketDataFetcher._normalize_eastmoney_df(part)
-                    all_parts.append(part)
-                    eastmoney_ok = True
-                    logger.info(f"[东方财富-{market_name}] {len(part)}只")
-            except Exception:
-                logger.debug(f"[东方财富-{market_name}] 不可用")
-
-        if eastmoney_ok:
-            df = pd.concat(all_parts, ignore_index=True)
-            logger.info(f"[东方财富-分批] 共获取 {len(df)} 只股票（全字段）")
-            return df
-
-        # 数据源2: 新浪财经（价格数据）+ 东方财富板块API补充基本面
+        """获取全市场A股实时行情（多数据源自动切换，优先可靠源）"""
+        # 数据源1: 新浪财经（目前最可靠，优先使用）
         try:
             df = ak.stock_zh_a_spot()
             df = df.rename(columns={
@@ -160,6 +137,34 @@ class MarketDataFetcher:
             return df
         except Exception as e2:
             logger.warning(f"新浪源不可用: {str(e2)[:80]}")
+
+        # 数据源2: 东方财富（字段更全，优先尝试沪A/深A）
+        import socket as _socket
+        _old_timeout = _socket.getdefaulttimeout()
+        _socket.setdefaulttimeout(8)
+        try:
+            all_parts = []
+            for market_func, market_name in [
+                (ak.stock_sh_a_spot_em, '沪A'),
+                (ak.stock_sz_a_spot_em, '深A'),
+                (ak.stock_bj_a_spot_em, '京A'),
+            ]:
+                try:
+                    part = market_func()
+                    if part is not None and not part.empty:
+                        part = MarketDataFetcher._normalize_eastmoney_df(part)
+                        all_parts.append(part)
+                        logger.info(f"[东方财富-{market_name}] {len(part)}只")
+                except Exception:
+                    logger.debug(f"[东方财富-{market_name}] 不可用")
+            if all_parts:
+                df = pd.concat(all_parts, ignore_index=True)
+                logger.info(f"[东方财富] 共获取 {len(df)} 只股票（全字段）")
+                return df
+        except Exception:
+            pass
+        finally:
+            _socket.setdefaulttimeout(_old_timeout)
 
         # 数据源3: 使用本地缓存
         from data.cache import load_stock_basic
@@ -349,10 +354,11 @@ class MarketDataFetcher:
             return pd.DataFrame()
 
     @staticmethod
-    def get_market_overview():
-        """获取市场总览（涨跌统计）"""
-        df = MarketDataFetcher.get_realtime_all_stocks()
-        if df.empty:
+    def get_market_overview(df=None):
+        """获取市场总览（涨跌统计）- 可传入已获取的DataFrame避免重复请求"""
+        if df is None:
+            df = MarketDataFetcher.get_realtime_all_stocks()
+        if df is None or df.empty:
             return {}
 
         total = len(df)

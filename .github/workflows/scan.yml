@@ -28,4 +28,5 @@ jobs:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SERVERCHAN_KEY1: ${{ secrets.SERVERCHAN_KEY1 }}
         run: python scan_headless.py

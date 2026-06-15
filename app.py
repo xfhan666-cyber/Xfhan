@@ -53,7 +53,7 @@ def load_data():
         if not idx.empty and 'name' in idx.columns:
             r['index'] = idx.drop_duplicates(subset=['name'], keep='first')
     except Exception: pass
-    try: r['overview'] = fetcher.get_market_overview()
+    try: r['overview'] = fetcher.get_market_overview(df=r['market'])
     except Exception: pass
     return r
 
@@ -154,6 +154,23 @@ with t1:
                 env_label = '🔴 极端弱势 — 建议空仓观望，或仅看超跌反弹'
             st.info(f"**大盘环境**: {env_label} | 上涨{overview.get('up',0)}家 下跌{overview.get('down',0)}家 涨停{limit_up}家 成交{overview.get('total_amount',0):.0f}亿")
 
+        # 用户设置：总资金 + 风险偏好
+        setting_col1, setting_col2 = st.columns(2)
+        with setting_col1:
+            total_capital = st.number_input(
+                "💰 你的总资金（元）", min_value=10000, value=100000, step=10000,
+                help="用于计算每只股票具体买多少股"
+            )
+        with setting_col2:
+            risk_level = st.selectbox(
+                "🎯 风险偏好",
+                ['conservative', 'moderate', 'aggressive'],
+                format_func=lambda x: {'conservative': '🛡️ 保守 (最多2只, 预留35%现金)',
+                                       'moderate': '⚖️ 稳健 (最多3只, 预留20%现金)',
+                                       'aggressive': '🚀 激进 (最多4只, 预留10%现金)'}[x],
+                index=1
+            )
+
         # 一键扫描按钮
         if st.button("🚀 一键扫描今日买入机会", type="primary", use_container_width=True):
             with st.spinner("正在运行7个策略分析全市场，大约需要30秒..."):
@@ -162,40 +179,76 @@ with t1:
             if not signals:
                 st.warning("今日无符合条件的买入信号。当前市场环境不适合出击，空仓也是策略。")
             else:
-                st.success(f"扫描完成！发现 {len(signals)} 个买入机会")
+                # === 仓位分配 ===
+                from portfolio.allocator import PortfolioAllocator
+                allocator = PortfolioAllocator(total_capital=total_capital)
+                plan = allocator.allocate(signals, risk_level=risk_level)
 
-                # 按置信度分档展示
-                strong = [s for s in signals if s.confidence >= 75]
-                medium = [s for s in signals if 55 <= s.confidence < 75]
-                weak = [s for s in signals if s.confidence < 55]
+                st.success(f"扫描完成！发现 {len(signals)} 个买入机会 → 精选 {len(plan.allocations)} 只")
 
-                if strong:
-                    st.subheader(f"🔥 强信号 ({len(strong)}个) — 重点考虑")
-                    for s in strong[:10]:
+                # === 买入清单（带具体股数）===
+                if plan.allocations:
+                    st.subheader("📋 今日买入清单")
+
+                    for i, a in enumerate(plan.allocations, 1):
+                        s = a.stock
+                        loss_amount = a.shares * (s.price - s.stop_loss)
+                        profit_amount = a.shares * (s.stop_profit - s.price)
                         multi = '多策略共识' if '|' in s.reason else '单策略推荐'
+
                         st.markdown(f"""<div class="signal-row">
-                            <div style="display:flex;justify-content:space-between">
-                                <span><strong style="font-size:1.1rem">{s.name}</strong> <span style="color:#94a3b8">{s.code}</span></span>
-                                <span style="color:#ef4444;font-weight:800">{s.confidence:.0f}% {multi}</span>
+                            <div style="display:flex;justify-content:space-between;align-items:center">
+                                <span>
+                                    <strong style="font-size:1.15rem">#{i} {s.name}</strong>
+                                    <span style="color:#94a3b8;font-size:0.9rem"> {s.code}</span>
+                                    <span style="color:#fbbf24;font-size:0.8rem;margin-left:8px">🔥{s.confidence:.0f}%</span>
+                                    <span style="color:#94a3b8;font-size:0.75rem"> {multi}</span>
+                                </span>
                             </div>
-                            <div style="margin-top:4px;font-size:0.85rem;color:#cbd5e1">
-                                买入价: <strong style="color:#fbbf24">{s.price}</strong> |
-                                止损: <strong style="color:#ef4444">{s.stop_loss}</strong> |
-                                止盈: <strong style="color:#10b981">{s.stop_profit}</strong>
+                            <div style="margin-top:6px;font-size:0.85rem;color:#cbd5e1;display:flex;gap:20px;flex-wrap:wrap">
+                                <span>买入价: <strong style="color:#fbbf24">¥{s.price}</strong></span>
+                                <span>数量: <strong style="color:#60a5fa">{a.shares}股</strong> ({a.shares//100}手)</span>
+                                <span>金额: <strong style="color:#60a5fa">¥{a.amount:,.0f}</strong> ({a.weight}%)</span>
                             </div>
-                            <div style="font-size:0.78rem;color:#94a3b8;margin-top:2px">📝 {s.reason}</div>
+                            <div style="margin-top:4px;font-size:0.85rem;color:#cbd5e1;display:flex;gap:20px">
+                                <span>🛑 止损: <strong style="color:#ef4444">¥{s.stop_loss}</strong> (亏¥{loss_amount:,.0f})</span>
+                                <span>🎯 止盈: <strong style="color:#10b981">¥{s.stop_profit}</strong> (盈¥{profit_amount:,.0f})</span>
+                            </div>
+                            <div style="font-size:0.78rem;color:#94a3b8;margin-top:2px">📝 {s.reason[:120]}</div>
                         </div>""", unsafe_allow_html=True)
 
-                if medium:
-                    with st.expander(f"🟡 中等信号 ({len(medium)}个) — 可参考"):
-                        for s in medium[:15]:
-                            st.markdown(f"""<div class="signal-row" style="border-left-color:#f59e0b">
+                    # 资金汇总
+                    st.divider()
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("💰 总资金", f"¥{plan.total_capital:,.0f}")
+                    c2.metric("📊 使用资金", f"¥{plan.used_capital:,.0f}", f"{plan.used_capital/plan.total_capital*100:.0f}%")
+                    c3.metric("💵 预留现金", f"¥{plan.cash_reserved:,.0f}", f"{plan.cash_reserved/plan.total_capital*100:.0f}%")
+                    c4.metric("⚡ 组合风险", f"{plan.risk_score}/100")
+
+                    if plan.notes:
+                        for note in plan.notes:
+                            st.caption(f"💡 {note}")
+
+                # === 其他信号（未入选的）===
+                allocated_codes = {a.stock.code for a in plan.allocations}
+                remaining = [s for s in signals if s.code not in allocated_codes]
+                strong_remaining = [s for s in remaining if s.confidence >= 75]
+                medium_remaining = [s for s in remaining if 55 <= s.confidence < 75]
+
+                if strong_remaining or medium_remaining:
+                    with st.expander(f"📋 其他信号 ({len(remaining)}个，因仓位/行业限制未入选)"):
+                        for s in strong_remaining[:10]:
+                            st.markdown(f"""<div class="signal-row" style="border-left-color:#6b7280">
                                 <strong>{s.name} ({s.code})</strong> {s.confidence:.0f}% |
                                 买{s.price} 止{s.stop_loss} 盈{s.stop_profit} | {s.reason[:80]}
                             </div>""", unsafe_allow_html=True)
-
+                        for s in medium_remaining[:10]:
+                            st.markdown(f"""<div class="signal-row" style="border-left-color:#6b7280">
+                                <strong>{s.name} ({s.code})</strong> {s.confidence:.0f}% |
+                                买{s.price} 止{s.stop_loss} | {s.reason[:60]}
+                            </div>""", unsafe_allow_html=True)
         else:
-            st.info("👆 点击上方按钮开始扫描。系统会自动运行7个策略，综合给出今日推荐。")
+            st.info("👆 设置资金和风险偏好后，点击上方按钮开始扫描。系统会自动给出具体的买入股数和止损金额。")
 
 # ===== Tab 2: 大盘概览 =====
 with t2:

@@ -8,6 +8,14 @@ import json
 import time
 from datetime import datetime
 
+# Windows终端UTF-8编码修复（解决emoji输出报错问题）
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 # 加载.env文件（本地使用）
 try:
     with open(os.path.join(os.path.dirname(__file__), '.env'), 'r') as f:
@@ -136,8 +144,8 @@ def send_serverchan(key, title, content):
         return False
 
 
-def format_report(signals, market_info=''):
-    """格式化为Markdown推送内容"""
+def format_report(signals, market_info='', total_capital=100000, risk_level='moderate'):
+    """格式化为Markdown推送内容，包含仓位分配"""
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     lines = [f"## 📈 A股早盘扫描 {now}", ""]
 
@@ -150,43 +158,86 @@ def format_report(signals, market_info=''):
         lines.append("当前市场环境不适合出击，空仓观望。")
         return '\n'.join(lines)
 
-    strong = [s for s in signals if s.confidence >= 75]
-    medium = [s for s in signals if 55 <= s.confidence < 75]
+    # 仓位分配
+    from portfolio.allocator import PortfolioAllocator
+    allocator = PortfolioAllocator(total_capital=total_capital)
+    plan = allocator.allocate(signals, risk_level=risk_level)
 
-    if strong:
-        lines.append(f"### 🔥 强信号 ({len(strong)}个)")
-        for i, s in enumerate(strong[:5], 1):
+    if plan.allocations:
+        lines.append(f"### 📋 今日买入清单 (总资金¥{total_capital:,})")
+        lines.append("")
+        for i, a in enumerate(plan.allocations[:5], 1):
+            s = a.stock
+            loss_amount = a.shares * (s.price - s.stop_loss)
+            profit_amount = a.shares * (s.stop_profit - s.price)
             lines.append(f"**{i}. {s.name}({s.code})** {s.confidence:.0f}%")
-            lines.append(f"> 买入: {s.price} | 止损: {s.stop_loss} | 止盈: {s.stop_profit}")
+            lines.append(f"> 买入: ¥{s.price} × **{a.shares}股({a.shares//100}手)** = ¥{a.amount:,.0f} ({a.weight}%)")
+            lines.append(f"> 🛑止损: ¥{s.stop_loss} (亏¥{loss_amount:,.0f}) | 🎯止盈: ¥{s.stop_profit} (盈¥{profit_amount:,.0f})")
             lines.append(f"> {s.reason[:100]}")
             lines.append("")
 
-    if medium:
-        lines.append(f"### 🟡 中等信号 ({len(medium)}个)")
-        for s in medium[:5]:
-            lines.append(f"- {s.name}({s.code}) {s.confidence:.0f}% | 买{s.price} 止{s.stop_loss}")
-        lines.append("")
+        lines.append(f"---")
+        lines.append(f"💰 总资金¥{plan.total_capital:,} | 使用¥{plan.used_capital:,.0f}({plan.used_capital/plan.total_capital*100:.0f}%) | 预留¥{plan.cash_reserved:,.0f}")
+    else:
+        # 无分配结果时回退到简单展示
+        strong = [s for s in signals if s.confidence >= 75]
+        medium = [s for s in signals if 55 <= s.confidence < 75]
 
-    lines.append("---")
-    lines.append(f"共扫描{len(signals)}个信号 | 数据来源: AKShare/Sina")
+        if strong:
+            lines.append(f"### 🔥 强信号 ({len(strong)}个)")
+            for i, s in enumerate(strong[:5], 1):
+                lines.append(f"**{i}. {s.name}({s.code})** {s.confidence:.0f}%")
+                lines.append(f"> 买入: {s.price} | 止损: {s.stop_loss} | 止盈: {s.stop_profit}")
+                lines.append(f"> {s.reason[:100]}")
+                lines.append("")
+
+        if medium:
+            lines.append(f"### 🟡 中等信号 ({len(medium)}个)")
+            for s in medium[:5]:
+                lines.append(f"- {s.name}({s.code}) {s.confidence:.0f}% | 买{s.price} 止{s.stop_loss}")
+            lines.append("")
+
+    lines.append("")
+    lines.append(f"共扫描{len(signals)}个信号 | 🤖 自动推送")
     return '\n'.join(lines)
 
 
 def main():
-    print(f"[{datetime.now()}] 早盘扫描开始...")
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{now_str}] 早盘扫描开始...")
+    print(f"   运行环境: {'GitHub Actions' if os.environ.get('GITHUB_ACTIONS') else '本地'}")
+    print(f"   Python: {sys.version}")
+
+    # 0. 输出配置状态（脱敏）
+    print("0/4 检查推送配置...")
+    has_wecom = bool(os.environ.get('WECOM_WEBHOOK', ''))
+    has_pushplus = bool(os.environ.get('PUSHPLUS_TOKEN', ''))
+    has_serverchan = bool(os.environ.get('SERVERCHAN_KEY', ''))
+    print(f"   企业微信: {'✅已配置' if has_wecom else '❌未配置'}")
+    print(f"   PushPlus: {'✅已配置' if has_pushplus else '❌未配置(推荐，免费200条/天)'}")
+    print(f"   Server酱: {'✅已配置' if has_serverchan else '❌未配置(5条/天)'}")
+
+    if not (has_wecom or has_pushplus or has_serverchan):
+        print("")
+        print("⚠️  警告: 所有推送通道均未配置！")
+        print("   请访问 https://www.pushplus.plus 微信扫码获取Token")
+        print("   然后添加到GitHub Secrets (PUSHPLUS_TOKEN) 或 .env 文件")
+        print("")
 
     # 1. 获取数据
-    print("1/3 获取市场数据...")
+    print("1/4 获取市场数据...")
     t0 = time.time()
     market_data = get_market_data()
     if market_data is None or market_data.empty:
-        print("数据获取失败！")
-        # 尝试发错误通知
-        webhook = os.environ.get('WECOM_WEBHOOK', '')
-        if webhook:
-            send_wecom_webhook(webhook, f"## ⚠️ 量化扫描异常\n{datetime.now()}\n数据获取失败，请检查。")
+        print("❌ 数据获取失败！")
+        # 尝试发错误通知（只有配置了的通道才发）
+        pp_token = os.environ.get('PUSHPLUS_TOKEN', '')
+        if pp_token:
+            send_pushplus(pp_token, '⚠️ 量化扫描异常', f"时间: {now_str}\n数据获取失败，请检查网络或AKShare数据源。")
         sys.exit(1)
-    print(f"   获取{len(market_data)}只股票，耗时{time.time()-t0:.0f}秒")
+
+    elapsed = time.time()-t0
+    print(f"   ✅ 获取{len(market_data)}只股票，耗时{elapsed:.0f}秒")
 
     # 市场概况
     up_count = len(market_data[market_data['pct_change'] > 0]) if 'pct_change' in market_data.columns else 0
@@ -203,41 +254,75 @@ def main():
         market_note += " 🔴极端"
 
     # 2. 运行策略
-    print("2/3 运行7策略扫描...")
+    print("2/4 运行7策略扫描...")
     signals = run_scan(market_data)
-    print(f"   共发现{len(signals)}个信号")
+    print(f"   ✅ 共发现{len(signals)}个信号")
 
-    # 3. 推送
-    print("3/3 推送到手机...")
-    report = format_report(signals, market_note)
+    if signals:
+        strong_count = len([s for s in signals if s.confidence >= 75])
+        medium_count = len([s for s in signals if 55 <= s.confidence < 75])
+        print(f"   强信号🔥: {strong_count}个 | 中等🟡: {medium_count}个")
 
-    pushed = False
-    # 主通道: 企业微信群机器人
+    # 3. 推送（改进：PushPlus优先作为主力通道，免费200条/天最实用）
+    print("3/4 推送到手机...")
+    # 默认10万资金、稳健模式（GitHub Actions环境变量可覆盖）
+    capital = float(os.environ.get('TOTAL_CAPITAL', 100000))
+    risk = os.environ.get('RISK_LEVEL', 'moderate')
+    report = format_report(signals, market_note, total_capital=capital, risk_level=risk)
+
+    push_results = []
+
+    # 通道1: PushPlus（推荐主力，200条/天免费）
+    pp_token = os.environ.get('PUSHPLUS_TOKEN', '')
+    if pp_token:
+        ok = send_pushplus(pp_token, 'A股早盘扫描', report)
+        push_results.append(f"PushPlus: {'✅' if ok else '❌'}")
+        if ok:
+            print(f"   ✅ PushPlus 推送成功")
+        else:
+            print(f"   ❌ PushPlus 推送失败")
+    else:
+        push_results.append("PushPlus: ⚪未配置")
+
+    # 通道2: 企业微信机器人
     webhook = os.environ.get('WECOM_WEBHOOK', '')
     if webhook:
-        pushed = send_wecom_webhook(webhook, report)
-        print(f"   企业微信: {'成功' if pushed else '失败'}")
+        ok = send_wecom_webhook(webhook, report)
+        push_results.append(f"企业微信: {'✅' if ok else '❌'}")
+        if ok:
+            print(f"   ✅ 企业微信 推送成功")
+    else:
+        push_results.append("企业微信: ⚪未配置")
 
-    # 备用: PushPlus
-    if not pushed:
-        pp_token = os.environ.get('PUSHPLUS_TOKEN', '')
-        if pp_token:
-            pushed = send_pushplus(pp_token, 'A股早盘扫描', report)
-            print(f"   PushPlus: {'成功' if pushed else '失败'}")
+    # 通道3: Server酱（备用，5条/天）
+    # 兼容两种命名：SERVERCHAN_KEY(旧) 和 SERVERCHAN_KEY1(新)
+    sc_key = os.environ.get('SERVERCHAN_KEY', '') or os.environ.get('SERVERCHAN_KEY1', '')
+    if sc_key:
+        ok = send_serverchan(sc_key, 'A股早盘扫描', report)
+        push_results.append(f"Server酱: {'✅' if ok else '❌'}")
+        if ok:
+            print(f"   ✅ Server酱 推送成功")
+    else:
+        push_results.append("Server酱: ⚪未配置")
 
-    # 备用: Server酱
-    if not pushed:
-        sc_key = os.environ.get('SERVERCHAN_KEY', '')
-        if sc_key:
-            pushed = send_serverchan(sc_key, 'A股早盘扫描', report)
-            print(f"   Server酱: {'成功' if pushed else '失败'}")
+    # 4. 输出报告（用于日志）
+    print("4/4 扫描报告:")
+    print(report)
+    print("")
+    print(f"[{datetime.now()}] 推送结果: {' | '.join(push_results)}")
 
-    if not pushed:
-        print("所有推送通道均失败！请检查配置。")
-        print(report)  # 至少打印出来
+    any_success = any('✅' in r for r in push_results)
+    if any_success:
+        print(f"[{datetime.now()}] 🎉 扫描完成，已推送到手机！")
+    else:
+        print(f"[{datetime.now()}] ⚠️ 所有推送通道均失败或未配置！")
+        print("")
+        print("📱 快速配置PushPlus（推荐）:")
+        print("   1. 打开 https://www.pushplus.plus 微信扫码")
+        print("   2. 复制Token")
+        print("   3. 在GitHub仓库 Settings→Secrets→Actions 添加 PUSHPLUS_TOKEN")
+        print("   4. 同时在本地 .env 文件添加: PUSHPLUS_TOKEN=你的token")
         sys.exit(1)
-
-    print(f"[{datetime.now()}] 扫描完成，已推送到手机！")
 
 
 if __name__ == '__main__':
