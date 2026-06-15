@@ -38,8 +38,8 @@ st.markdown("""<style>
     [data-testid="stDataFrame"] th { background: #1e293b; color: #94a3b8; font-size: 0.8rem; }
 </style>""", unsafe_allow_html=True)
 
-# ============ 数据加载 ============
-@st.cache_data(ttl=600, show_spinner="正在获取A股实时数据...")
+# ============ 数据加载（按需，避免每次打开页面等待1分钟）============
+@st.cache_data(ttl=600, show_spinner="正在获取A股实时数据，请稍候...")
 def load_data():
     from data.fetcher import fetcher
     r = {'market': None, 'index': None, 'overview': {}, 'time': ''}
@@ -56,6 +56,13 @@ def load_data():
     try: r['overview'] = fetcher.get_market_overview(df=r['market'])
     except Exception: pass
     return r
+
+# 初始化session state
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+    st.session_state.market_data = None
+    st.session_state.index_data = None
+    st.session_state.overview = {}
 
 def run_all_strategies(market_data):
     """运行全部7个策略，返回合并信号"""
@@ -98,18 +105,10 @@ def run_all_strategies(market_data):
     return result
 
 # ============ 主界面 ============
-data = load_data()
-st.session_state.market_data = data['market']
-st.session_state.index_data = data['index']
-st.session_state.overview = data['overview']
-
-market_ok = data['market'] is not None and not data['market'].empty
-n = len(data['market']) if market_ok else 0
-
 st.markdown(f"""
 <div style="background:linear-gradient(135deg,#0f172a,#1e293b);border-bottom:2px solid #3b82f6;padding:10px 20px;display:flex;justify-content:space-between;align-items:center">
     <h1 style="font-size:1.2rem;color:#fbbf24;margin:0">📈 A股量化选股</h1>
-    <span style="color:#94a3b8;font-size:0.8rem">{'✅' if market_ok else '⚠️'} {n}只股票 | {data.get('time','加载中')}</span>
+    <span style="color:#94a3b8;font-size:0.8rem">{'✅ 已加载' if st.session_state.data_loaded else '⏳ 待加载'}</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -120,9 +119,38 @@ t1, t2, t3 = st.tabs(["⚡ 早盘扫描", "📊 大盘概览", "📖 使用帮�
 with t1:
     st.markdown("### ⚡ 一键扫描今日机会")
 
-    if not market_ok:
-        st.error("数据加载中，请稍候刷新...")
+    # 数据加载按钮（仅在数据未加载时显示）
+    if not st.session_state.data_loaded:
+        st.warning("👆 首次使用请先加载数据（约需40秒），之后10分钟内无需重复加载")
+        if st.button("📡 加载市场数据", type="primary", use_container_width=True):
+            with st.spinner("正在获取全市场实时数据（5514只股票），请耐心等待..."):
+                data = load_data()
+                st.session_state.market_data = data['market']
+                st.session_state.index_data = data['index']
+                st.session_state.overview = data['overview']
+                st.session_state.data_loaded = True
+                st.session_state.market_time = data.get('time', '')
+            st.rerun()
     else:
+        # 数据已加载，正常显示
+        data = {
+            'market': st.session_state.market_data,
+            'index': st.session_state.index_data,
+            'overview': st.session_state.overview,
+            'time': st.session_state.get('market_time', '')
+        }
+        market_ok = data['market'] is not None and not data['market'].empty
+        n = len(data['market']) if market_ok else 0
+
+        # 刷新按钮
+        refresh_col1, refresh_col2 = st.columns([1, 4])
+        with refresh_col1:
+            if st.button("🔄 刷新数据", use_container_width=True):
+                st.session_state.data_loaded = False
+                st.cache_data.clear()
+                st.rerun()
+        with refresh_col2:
+            st.caption(f"共{n}只股票 | 更新时间: {data.get('time', '未知')} | 缓存10分钟自动过期")
         # 大盘状态速览
         overview = data.get('overview', {})
         idx_data = data.get('index')
@@ -253,28 +281,29 @@ with t1:
 # ===== Tab 2: 大盘概览 =====
 with t2:
     st.subheader("📊 市场数据")
-    if market_ok:
-        df = data['market']
-        st.caption(f"共{len(df)}只股票 | 更新时间{data.get('time','')}")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**涨幅榜Top15**")
-            dc = ['code','name','price','pct_change'] if all(c in df.columns for c in ['code','name','price','pct_change']) else None
-            if dc:
-                st.dataframe(df.nlargest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
-        with col_b:
-            st.markdown("**跌幅榜Top15**")
-            if dc:
-                st.dataframe(df.nsmallest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
-
-        if 'pct_change' in df.columns:
-            bins = [-100, -9.9, -5, -3, -1, 0, 1, 3, 5, 9.9, 100]
-            labels = ['跌停','-5~-10%','-3~-5%','-1~-3%','0~-1%','0~+1%','+1~3%','+3~5%','+5~10%','涨停']
-            df['rng'] = pd.cut(df['pct_change'], bins=bins, labels=labels)
-            dist = df['rng'].value_counts().reindex(labels, fill_value=0)
-            st.bar_chart(pd.DataFrame({'区间':labels,'数量':dist.values}).set_index('区间'), use_container_width=True)
+    if not st.session_state.data_loaded:
+        st.warning("请先在「早盘扫描」页加载市场数据")
     else:
-        st.warning("数据加载中...")
+        df = st.session_state.market_data
+        if df is not None and not df.empty:
+            st.caption(f"共{len(df)}只股票 | 更新时间{st.session_state.get('market_time', '')}")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**涨幅榜Top15**")
+                dc = ['code','name','price','pct_change'] if all(c in df.columns for c in ['code','name','price','pct_change']) else None
+                if dc:
+                    st.dataframe(df.nlargest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
+            with col_b:
+                st.markdown("**跌幅榜Top15**")
+                if dc:
+                    st.dataframe(df.nsmallest(15,'pct_change')[dc], hide_index=True, use_container_width=True)
+
+            if 'pct_change' in df.columns:
+                bins = [-100, -9.9, -5, -3, -1, 0, 1, 3, 5, 9.9, 100]
+                labels = ['跌停','-5~-10%','-3~-5%','-1~-3%','0~-1%','0~+1%','+1~3%','+3~5%','+5~10%','涨停']
+                df['rng'] = pd.cut(df['pct_change'], bins=bins, labels=labels)
+                dist = df['rng'].value_counts().reindex(labels, fill_value=0)
+                st.bar_chart(pd.DataFrame({'区间':labels,'数量':dist.values}).set_index('区间'), use_container_width=True)
 
 # ===== Tab 3: 使用帮助 =====
 with t3:
