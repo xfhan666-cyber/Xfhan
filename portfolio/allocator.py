@@ -275,11 +275,13 @@ class PortfolioAllocator:
         # 2. 策略来源
         strategy_count = signal.reason.count('|') + 1
         if strategy_count >= 3:
-            parts.append(f"{strategy_count}个策略同时推荐（高度共识）")
+            parts.append(f"{strategy_count}个策略高度共识")
         elif strategy_count >= 2:
             parts.append(f"{strategy_count}个策略共识推荐")
         else:
-            parts.append(f"单策略推荐：{signal.strategy}")
+            # 使用干净的策略名（去除内部名称中的+号后缀）
+            clean_name = signal.strategy.replace('+资金流', '').replace('+', '')
+            parts.append(f"单策略推荐")
 
         # 3. 置信度解读
         if signal.confidence >= 85:
@@ -305,10 +307,10 @@ class PortfolioAllocator:
         reason = '；'.join(parts[:4])  # 前4条作为简短理由
 
         # 详细排名信息
+        clean_name = signal.strategy.replace('+资金流', '').replace('+', '')
         rank_details = [
-            f"策略: {signal.strategy}",
-            f"置信度: {signal.confidence:.0f}%",
-            f"策略共识数: {strategy_count}",
+            f"置信度 {signal.confidence:.0f}%",
+            f"策略共识 {strategy_count}个",
         ]
         if factors:
             for k, v in factors.items():

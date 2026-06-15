@@ -1,7 +1,7 @@
 """
 A股量化选股系统 — 市场温度计 → 板块轮动 → 个股精选
 """
-import os
+import os, re
 for v in ['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']:
     os.environ.pop(v, None)
 os.environ['no_proxy'] = '*'
@@ -23,27 +23,27 @@ st.set_page_config(page_title="A股量化选股", page_icon="📈", layout="wide
                    initial_sidebar_state="collapsed")
 
 # ============================================================
-# 王者荣耀主题 — 蓝红金配色
+# CSS — 王者荣耀蓝红金 · 高对比度
 # ============================================================
 st.markdown("""
 <style>
     :root {
-        --bg-deep: #060d1a;
-        --bg-primary: #0a1628;
-        --bg-card: #0d1f3c;
-        --bg-elevated: #122546;
-        --border: #1a3355;
-        --blue: #2962ff;
-        --blue-glow: #448aff;
-        --blue-light: #82b1ff;
-        --red: #c62828;
-        --red-glow: #e53935;
-        --red-light: #ef5350;
-        --gold: #c9a84c;
-        --gold-light: #f0c060;
-        --text: #e8eaf0;
-        --text-dim: #8a95a5;
-        --text-muted: #5a6575;
+        --bg-deep: #050d18;
+        --bg-primary: #091525;
+        --bg-card: #0f1e38;
+        --bg-elevated: #162848;
+        --border: #223d60;
+        --blue: #3b82f6;
+        --blue-glow: #60a5fa;
+        --blue-light: #b4d4ff;
+        --red: #e53935;
+        --red-glow: #f55a55;
+        --red-light: #ff8a80;
+        --gold: #e6b422;
+        --gold-light: #ffd54f;
+        --text: #f8f9fc;
+        --text-dim: #c0c6d4;
+        --text-muted: #8a92a4;
     }
 
     .stApp { background: var(--bg-deep) !important; }
@@ -52,7 +52,6 @@ st.markdown("""
     [data-testid="stSidebarCollapsedControl"] { display: none !important; }
     #MainMenu, footer, header { display: none !important; }
 
-    /* === 消除所有白底 === */
     div[data-baseweb="select"] > div, div[data-baseweb="popover"],
     div[data-baseweb="menu"], div[data-baseweb="option"] {
         background: var(--bg-elevated) !important; border-color: var(--border) !important; color: var(--text) !important;
@@ -78,17 +77,17 @@ st.markdown("""
         border-radius: 8px 8px 0 0 !important; padding: 10px 20px !important;
         font-weight: 600 !important; border: 1px solid var(--border) !important; border-bottom: none !important;
     }
-    .stTabs [aria-selected="true"] { background: var(--blue) !important; color: white !important; border-color: var(--blue) !important; }
+    .stTabs [aria-selected="true"] { background: var(--blue) !important; color: #fff !important; border-color: var(--blue) !important; }
 
     .stButton > button {
-        background: linear-gradient(135deg, var(--blue) 0%, #1a5ce0 100%) !important;
-        color: white !important; border: none !important; border-radius: 6px !important;
+        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+        color: #fff !important; border: none !important; border-radius: 6px !important;
         padding: 14px 32px !important; font-weight: 700 !important; font-size: 1rem !important;
         letter-spacing: 1px !important; transition: all 0.2s !important;
     }
     .stButton > button:hover {
-        background: linear-gradient(135deg, #3478ff 0%, #2962ff 100%) !important;
-        box-shadow: 0 0 20px rgba(41,98,255,0.3) !important; transform: translateY(-1px) !important;
+        background: linear-gradient(135deg, #4d94f7 0%, #3b82f6 100%) !important;
+        box-shadow: 0 0 20px rgba(59,130,246,0.3) !important; transform: translateY(-1px) !important;
     }
 
     [data-testid="stMetric"] {
@@ -103,15 +102,16 @@ st.markdown("""
     [data-testid="stDataFrame"] td { background: var(--bg-card) !important; color: var(--text) !important; font-size: 0.8rem !important; padding: 8px 10px !important; }
 
     div[data-testid="stAlert"] { background: var(--bg-card) !important; border-radius: 8px !important; border: 1px solid var(--border) !important; }
+    div[data-testid="stAlert"] p, div[data-testid="stAlert"] span { color: var(--text) !important; }
     hr { border-color: var(--border) !important; }
     .stChart { background: transparent !important; }
 
-    /* === 自定义组件 === */
+    /* === 自定义 === */
     .market-card {
-        background: linear-gradient(160deg, #0d1f3c 0%, #0a1628 100%);
-        border: 1px solid #1a3a60; border-radius: 10px; padding: 20px 24px; margin: 12px 0;
+        background: linear-gradient(160deg, #0f1e38 0%, #091525 100%);
+        border: 1px solid #223d60; border-radius: 10px; padding: 20px 24px; margin: 12px 0;
     }
-    .market-card.hot { border-color: var(--red); box-shadow: 0 0 25px rgba(198,40,40,0.08); }
+    .market-card.hot { border-color: var(--red); box-shadow: 0 0 25px rgba(229,57,53,0.1); }
 
     .stock-card {
         background: var(--bg-card); border: 1px solid var(--border);
@@ -121,39 +121,36 @@ st.markdown("""
     .stock-card.main { border-left: 3px solid var(--red); }
 
     .stock-header {
-        padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start;
-        border-bottom: 1px solid rgba(255,255,255,0.04);
+        padding: 18px 22px; display: flex; justify-content: space-between; align-items: flex-start;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
     }
-    .stock-body { padding: 16px 20px; }
-    .stock-chart { padding: 8px 20px 16px 20px; }
+    .stock-body { padding: 18px 22px; }
 
     .tag {
-        display: inline-block; padding: 2px 8px; border-radius: 4px;
-        font-size: 0.7rem; font-weight: 600; margin: 1px 3px; letter-spacing: 0.3px;
+        display: inline-block; padding: 3px 10px; border-radius: 4px;
+        font-size: 0.72rem; font-weight: 600; margin: 1px 4px; letter-spacing: 0.3px;
     }
-    .tag-red { background: rgba(198,40,40,0.2); color: var(--red-light); }
-    .tag-blue { background: rgba(41,98,255,0.2); color: var(--blue-light); }
-    .tag-gold { background: rgba(201,168,76,0.15); color: var(--gold-light); }
+    .tag-red { background: rgba(229,57,53,0.18); color: var(--red-light); }
+    .tag-blue { background: rgba(59,130,246,0.18); color: var(--blue-light); }
+    .tag-gold { background: rgba(230,180,34,0.15); color: var(--gold-light); }
     .tag-green { background: rgba(16,185,129,0.15); color: #6ee7b7; }
 
     .theme-pill {
-        display: inline-block; padding: 5px 12px; border-radius: 4px;
-        font-size: 0.78rem; font-weight: 600; margin: 2px;
-        background: rgba(41,98,255,0.15); color: var(--blue-light); border: 1px solid rgba(41,98,255,0.3);
+        display: inline-block; padding: 6px 14px; border-radius: 4px;
+        font-size: 0.8rem; font-weight: 600; margin: 2px;
+        background: rgba(59,130,246,0.15); color: var(--blue-light); border: 1px solid rgba(59,130,246,0.3);
     }
 
     .section-title {
-        font-size: 0.8rem; font-weight: 700; color: var(--text-dim);
+        font-size: 0.82rem; font-weight: 700; color: var(--text-dim);
         letter-spacing: 2px; margin: 20px 0 10px 0;
     }
 
-    .price-row {
-        display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-end;
-    }
+    .price-row { display: flex; gap: 36px; flex-wrap: wrap; align-items: flex-end; }
     .price-item { text-align: left; }
-    .price-item .label { font-size: 0.68rem; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 2px; }
-    .price-item .value { font-size: 1.05rem; font-weight: 700; }
-    .price-item .sub { font-size: 0.72rem; margin-top: 1px; }
+    .price-item .label { font-size: 0.7rem; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 3px; }
+    .price-item .value { font-size: 1.1rem; font-weight: 700; color: var(--text); }
+    .price-item .sub { font-size: 0.74rem; margin-top: 2px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -179,7 +176,6 @@ def load_data():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stock_chart(code, days=30):
-    """获取个股近期K线用于迷你走势图"""
     try:
         from data.fetcher import fetcher
         end = datetime.now().strftime('%Y%m%d')
@@ -198,7 +194,7 @@ if 'data_loaded' not in st.session_state:
     st.session_state.overview = {}
 
 # ============================================================
-# 策略配置
+# 策略
 # ============================================================
 STRATEGY_NAMES = {
     'mean_reversion': '超跌反弹',
@@ -236,8 +232,6 @@ def run_core_strategies(market_data):
             merged[sig.code] = sig
         else:
             merged[sig.code].confidence = min(95, merged[sig.code].confidence + 8)
-            if sig.strategy not in merged[sig.code].reason:
-                merged[sig.code].reason += f' | +{sig.strategy}'
             merged[sig.code].factors['consensus'] = merged[sig.code].factors.get('consensus', 1) + 1
     return sorted(merged.values(), key=lambda x: x.confidence, reverse=True)
 
@@ -246,8 +240,8 @@ def run_core_strategies(market_data):
 # ============================================================
 st.markdown("""
 <div style="padding:8px 0 4px 0">
-    <span style="font-size:1.2rem;font-weight:800;color:#e8eaf0;letter-spacing:1px">A股量化选股</span>
-    <span style="color:#5a6575;font-size:0.72rem;margin-left:10px">温度计 · 板块 · 精选</span>
+    <span style="font-size:1.2rem;font-weight:800;color:#f8f9fc;letter-spacing:1px">A股量化选股</span>
+    <span style="color:#8a92a4;font-size:0.72rem;margin-left:10px">温度计 · 板块 · 精选</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -295,36 +289,36 @@ with t1:
 
             # ---------- 市场温度计 ----------
             card_class = 'market-card hot' if regime.score >= 70 else 'market-card'
-            fg_color = '#ef5350' if regime.fear_greed_index > 70 else ('#6ee7b7' if regime.fear_greed_index < 30 else '#f0c060')
+            fg_color = '#ff8a80' if regime.fear_greed_index > 70 else ('#6ee7b7' if regime.fear_greed_index < 30 else '#ffd54f')
             st.markdown(f"""
             <div class="{card_class}">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px">
                     <div>
-                        <div style="font-size:1.4rem;font-weight:800;color:#e8eaf0">{regime.status_emoji} {regime.status}</div>
-                        <div style="color:#5a6575;font-size:0.75rem;margin-top:2px">评分 {regime.score}/100</div>
+                        <div style="font-size:1.4rem;font-weight:800;color:#f8f9fc">{regime.status_emoji} {regime.status}</div>
+                        <div style="color:#8a92a4;font-size:0.75rem;margin-top:2px">评分 {regime.score}/100</div>
                     </div>
                     <div style="display:flex;gap:28px;flex-wrap:wrap">
-                        <div style="text-align:center"><div style="color:#5a6575;font-size:0.65rem">涨跌比</div><div style="font-size:1.05rem;font-weight:700;color:#e8eaf0">{regime.breadth}%</div></div>
-                        <div style="text-align:center"><div style="color:#5a6575;font-size:0.65rem">涨停</div><div style="font-size:1.05rem;font-weight:700;color:#ef5350">{regime.limit_up_count}</div></div>
-                        <div style="text-align:center"><div style="color:#5a6575;font-size:0.65rem">跌停</div><div style="font-size:1.05rem;font-weight:700;color:#6ee7b7">{regime.limit_down_count}</div></div>
-                        <div style="text-align:center"><div style="color:#5a6575;font-size:0.65rem">成交额</div><div style="font-size:1.05rem;font-weight:700;color:#e8eaf0">{regime.total_amount:.0f}亿</div></div>
-                        <div style="text-align:center"><div style="color:#5a6575;font-size:0.65rem">贪婪指数</div><div style="font-size:1.05rem;font-weight:700;color:{fg_color}">{regime.fear_greed_index}/100</div></div>
+                        <div style="text-align:center"><div style="color:#8a92a4;font-size:0.65rem">涨跌比</div><div style="font-size:1.05rem;font-weight:700;color:#f8f9fc">{regime.breadth}%</div></div>
+                        <div style="text-align:center"><div style="color:#8a92a4;font-size:0.65rem">涨停</div><div style="font-size:1.05rem;font-weight:700;color:#ff8a80">{regime.limit_up_count}</div></div>
+                        <div style="text-align:center"><div style="color:#8a92a4;font-size:0.65rem">跌停</div><div style="font-size:1.05rem;font-weight:700;color:#6ee7b7">{regime.limit_down_count}</div></div>
+                        <div style="text-align:center"><div style="color:#8a92a4;font-size:0.65rem">成交额</div><div style="font-size:1.05rem;font-weight:700;color:#f8f9fc">{regime.total_amount:.0f}亿</div></div>
+                        <div style="text-align:center"><div style="color:#8a92a4;font-size:0.65rem">贪婪指数</div><div style="font-size:1.05rem;font-weight:700;color:{fg_color}">{regime.fear_greed_index}/100</div></div>
                     </div>
                 </div>
-                <div style="margin-top:14px;padding:8px 14px;background:rgba(41,98,255,0.06);border-radius:6px;font-size:0.8rem;color:#8a95a5">
-                    建议仓位 <strong style="color:#f0c060">{regime.suggested_position*100:.0f}%</strong> &nbsp;·&nbsp; {' &nbsp;·&nbsp; '.join(regime.advice)}
+                <div style="margin-top:14px;padding:8px 14px;background:rgba(59,130,246,0.06);border-radius:6px;font-size:0.8rem;color:#c0c6d4">
+                    建议仓位 <strong style="color:#ffd54f">{regime.suggested_position*100:.0f}%</strong> &nbsp;·&nbsp; {' &nbsp;·&nbsp; '.join(regime.advice)}
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
             # ---------- 主线板块 ----------
             if sector_result.main_themes:
-                pills = ' '.join(f'<span class="theme-pill">{s.name} <span style="color:#f0c060">{s.pct_change:+.1f}%</span></span>' for s in sector_result.main_themes[:8])
-                st.markdown(f'<div style="margin:8px 0"><span style="color:#5a6575;font-weight:600;font-size:0.8rem;margin-right:8px">主线</span>{pills}</div>', unsafe_allow_html=True)
+                pills = ' '.join(f'<span class="theme-pill">{s.name} <span style="color:#ffd54f">{s.pct_change:+.1f}%</span></span>' for s in sector_result.main_themes[:8])
+                st.markdown(f'<div style="margin:8px 0"><span style="color:#8a92a4;font-weight:600;font-size:0.8rem;margin-right:8px">主线</span>{pills}</div>', unsafe_allow_html=True)
 
             if sector_result.ai_tech_sectors:
                 pills = ' '.join(f'<span class="tag tag-blue">{s.name}</span>' for s in sector_result.ai_tech_sectors[:6])
-                st.markdown(f'<div style="margin:4px 0"><span style="color:#82b1ff;font-weight:600;font-size:0.75rem;margin-right:8px">AI/科技</span>{pills}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="margin:4px 0"><span style="color:#b4d4ff;font-weight:600;font-size:0.75rem;margin-right:8px">AI / 科技</span>{pills}</div>', unsafe_allow_html=True)
 
             if dq == 'basic':
                 st.caption("当前仅价量数据。交易时段通常自动获取完整数据。")
@@ -347,51 +341,51 @@ with t1:
 
                 st.markdown(f'<div class="section-title">精选结果 &nbsp;·&nbsp; {len(signals)} 信号 &nbsp;→&nbsp; {len(plan.allocations)} 入选</div>', unsafe_allow_html=True)
 
-                # ---------- 个股卡片（含走势图）----------
+                # ---------- 个股卡片 ----------
                 if plan.allocations:
                     for i, a in enumerate(plan.allocations, 1):
                         s = a.stock
                         loss_amt = a.shares * (s.price - s.stop_loss)
                         profit_amt = a.shares * (s.stop_profit - s.price)
-                        strat_count = s.reason.count('|') + 1
+                        strat_count = s.factors.get('consensus', 1)
                         in_theme = s.code in main_theme_codes
                         card_class = 'stock-card main' if in_theme else 'stock-card'
                         strategy_name = s.factors.get('strategy_name', s.strategy)
 
-                        # 获取走势图数据
                         chart_df = fetch_stock_chart(s.code, days=30)
 
+                        # 卡片头
                         st.markdown(f"""
                         <div class="{card_class}">
                             <div class="stock-header">
                                 <div>
-                                    <span style="font-size:1.15rem;font-weight:700;color:#e8eaf0">#{i} {s.name}</span>
-                                    <span class="tag tag-gold" style="margin-left:6px">{s.confidence:.0f}%</span>
+                                    <span style="font-size:1.15rem;font-weight:700;color:#f8f9fc">#{i} {s.name}</span>
+                                    <span class="tag tag-gold" style="margin-left:8px">{s.confidence:.0f}%</span>
                                     <span class="tag tag-blue">{strategy_name}</span>
-                                    {f'<span class="tag tag-green">{strat_count}策略共识</span>' if strat_count >= 2 else ''}
-                                    {f'<span class="tag tag-red">主线</span>' if in_theme else ''}
+                                    {f'<span class="tag tag-green">多策略共识</span>' if strat_count >= 2 else ''}
+                                    {f'<span class="tag tag-red">主线板块</span>' if in_theme else ''}
                                 </div>
                             </div>
                             <div class="stock-body">
                                 <div class="price-row">
                                     <div class="price-item">
                                         <div class="label">买入价</div>
-                                        <div class="value" style="color:#f0c060">¥{s.price}</div>
+                                        <div class="value" style="color:#ffd54f">¥{s.price}</div>
                                     </div>
                                     <div class="price-item">
                                         <div class="label">数量</div>
-                                        <div class="value" style="color:#e8eaf0">{a.shares}股</div>
-                                        <div class="sub" style="color:#5a6575">{a.shares//100}手</div>
+                                        <div class="value">{(a.shares//100)}手</div>
+                                        <div class="sub" style="color:#8a92a4">{a.shares}股</div>
                                     </div>
                                     <div class="price-item">
-                                        <div class="label">金额 / 仓位</div>
-                                        <div class="value" style="color:#82b1ff">¥{a.amount:,.0f}</div>
-                                        <div class="sub" style="color:#5a6575">{a.weight}%</div>
+                                        <div class="label">金额</div>
+                                        <div class="value" style="color:#b4d4ff">¥{a.amount:,.0f}</div>
+                                        <div class="sub" style="color:#8a92a4">仓位 {a.weight}%</div>
                                     </div>
                                     <div class="price-item">
                                         <div class="label">止损</div>
-                                        <div class="value" style="color:#ef5350">¥{s.stop_loss}</div>
-                                        <div class="sub" style="color:#ef5350">-¥{loss_amt:,.0f}</div>
+                                        <div class="value" style="color:#ff8a80">¥{s.stop_loss}</div>
+                                        <div class="sub" style="color:#ff8a80">-¥{loss_amt:,.0f}</div>
                                     </div>
                                     <div class="price-item">
                                         <div class="label">止盈</div>
@@ -403,35 +397,22 @@ with t1:
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # 走势图（用streamlit原生chart）
+                        # 走势图
                         if chart_df is not None and len(chart_df) >= 5:
                             with st.expander(f"{s.name} 近30日走势", expanded=(i == 1)):
-                                # 计算涨跌颜色
                                 first_close = chart_df['close'].iloc[0]
                                 last_close = chart_df['close'].iloc[-1]
-                                trend_color = '#ef5350' if last_close >= first_close else '#2962ff'
-
+                                trend_color = '#ff8a80' if last_close >= first_close else '#3b82f6'
                                 chart_df_display = chart_df.set_index('date')
-                                st.line_chart(
-                                    chart_df_display['close'],
-                                    height=180,
-                                    color=trend_color,
-                                    use_container_width=True
-                                )
-                                # 成交量柱状图
-                                st.bar_chart(
-                                    chart_df_display['volume'],
-                                    height=60,
-                                    color='#5a6575',
-                                    use_container_width=True
-                                )
+                                st.line_chart(chart_df_display['close'], height=180, color=trend_color, use_container_width=True)
+                                st.bar_chart(chart_df_display['volume'], height=60, color='#8a92a4', use_container_width=True)
                         else:
-                            st.caption(f"  {s.name} 走势数据暂不可用")
+                            st.caption(f"{s.name} 走势数据暂不可用")
 
-                        # 精选理由
+                        # 理由
                         st.markdown(f"""
-                        <div style="margin:-6px 0 0 0;padding:6px 20px;font-size:0.78rem;color:#8a95a5">
-                            理由：{a.reason} &nbsp;|&nbsp; {a.rank_info}
+                        <div style="margin:-4px 0 0 0;padding:8px 22px;font-size:0.8rem;color:#c0c6d4">
+                            {a.reason}
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -453,7 +434,7 @@ with t1:
                     for note in plan.notes:
                         st.caption(f"— {note}")
 
-                # ---------- 未入选信号 ----------
+                # ---------- 未入选 ----------
                 allocated_codes = {a.stock.code for a in plan.allocations}
                 remaining = [s for s in signals if s.code not in allocated_codes and s.confidence >= 65]
                 if remaining:
@@ -462,10 +443,10 @@ with t1:
                             sn = s.factors.get('strategy_name', s.strategy)
                             st.markdown(f"""
                             <div style="padding:6px 12px;margin:3px 0;background:rgba(255,255,255,0.02);border-radius:6px;font-size:0.8rem">
-                                <strong style="color:#e8eaf0">{s.name}</strong>
-                                <span style="color:#f0c060;margin-left:6px">{s.confidence:.0f}%</span>
+                                <strong style="color:#f8f9fc">{s.name}</strong>
+                                <span style="color:#ffd54f;margin-left:6px">{s.confidence:.0f}%</span>
                                 <span class="tag tag-blue" style="margin-left:6px">{sn}</span>
-                                <span style="color:#8a95a5;margin-left:8px">¥{s.price} 止¥{s.stop_loss}</span>
+                                <span style="color:#8a92a4;margin-left:8px">¥{s.price} &nbsp; 止损 ¥{s.stop_loss}</span>
                             </div>
                             """, unsafe_allow_html=True)
 
@@ -481,7 +462,7 @@ with t1:
         st.caption(f"数据已就绪（{n}只股票），点击上方按钮开始扫描")
 
 # ============================================================
-# Tab 2: 大盘数据
+# Tab 2
 # ============================================================
 with t2:
     st.markdown('<div class="section-title">市场数据</div>', unsafe_allow_html=True)
@@ -515,11 +496,11 @@ with t2:
                 st.bar_chart(pd.DataFrame({'区间': labels, '数量': dist.values}).set_index('区间'), use_container_width=True)
 
 # ============================================================
-# Tab 3: 使用说明
+# Tab 3
 # ============================================================
 with t3:
     st.markdown("""
-    <div style="max-width:700px">
+    <div style="max-width:700px;color:#c0c6d4">
 
     ### 操作流程
 
