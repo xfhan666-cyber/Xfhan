@@ -177,14 +177,15 @@ with t1:
                         s = a.stock
                         loss_amount = a.shares * (s.price - s.stop_loss)
                         profit_amount = a.shares * (s.stop_profit - s.price)
-                        multi = '多策略共识' if '|' in s.reason else '单策略推荐'
+                        strategy_count = s.reason.count('|') + 1
+                        consensus_badge = f'🏅{strategy_count}策略共识' if strategy_count >= 2 else '单策略'
                         st.markdown(f"""<div class="signal-row">
                             <div style="display:flex;justify-content:space-between;align-items:center">
                                 <span>
                                     <strong style="font-size:1.15rem">#{i} {s.name}</strong>
                                     <span style="color:#94a3b8;font-size:0.9rem"> {s.code}</span>
                                     <span style="color:#fbbf24;font-size:0.8rem;margin-left:8px">🔥{s.confidence:.0f}%</span>
-                                    <span style="color:#94a3b8;font-size:0.75rem"> {multi}</span>
+                                    <span style="color:#10b981;font-size:0.75rem;margin-left:4px"> {consensus_badge}</span>
                                 </span>
                             </div>
                             <div style="margin-top:6px;font-size:0.85rem;color:#cbd5e1;display:flex;gap:20px;flex-wrap:wrap">
@@ -196,7 +197,9 @@ with t1:
                                 <span>止损: <strong style="color:#ef4444">¥{s.stop_loss}</strong> (亏¥{loss_amount:,.0f})</span>
                                 <span>止盈: <strong style="color:#10b981">¥{s.stop_profit}</strong> (盈¥{profit_amount:,.0f})</span>
                             </div>
-                            <div style="font-size:0.78rem;color:#94a3b8;margin-top:2px">{s.reason[:120]}</div>
+                            <div style="font-size:0.82rem;color:#fbbf24;margin-top:4px">🎯 精选理由: {a.reason}</div>
+                            <div style="font-size:0.75rem;color:#64748b;margin-top:1px">📊 {a.rank_info}</div>
+                            <div style="font-size:0.75rem;color:#94a3b8;margin-top:1px">📝 策略详情: {s.reason[:100]}</div>
                         </div>""", unsafe_allow_html=True)
 
                     st.divider()

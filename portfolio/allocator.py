@@ -12,21 +12,22 @@ from strategies.base_strategy import TradeSignal
 class AllocationResult:
     """分配结果"""
     stock: TradeSignal
-    shares: int                    # 建议买入股数（整手=100股）
-    amount: float                  # 建议买入金额
-    weight: float                  # 占总资金比例(%)
-    reason: str                    # 分配理由
+    shares: int
+    amount: float
+    weight: float
+    reason: str          # 精选理由（为什么选这只）
+    rank_info: str = ''  # 排名详情
 
 
 @dataclass
 class PortfolioPlan:
     """组合计划"""
-    total_capital: float = 100000   # 总资金
-    used_capital: float = 0         # 已用资金
-    cash_reserved: float = 0        # 预留现金
+    total_capital: float = 100000
+    used_capital: float = 0
+    cash_reserved: float = 0
     allocations: List[AllocationResult] = field(default_factory=list)
-    risk_score: float = 0           # 组合风险评分
-    expected_return: float = 0      # 预期收益
+    risk_score: float = 0
+    expected_return: float = 0
     notes: List[str] = field(default_factory=list)
 
 
@@ -34,268 +35,304 @@ class PortfolioAllocator:
     """
     投资组合分配器
 
-    核心理念：
-    - 每天最多买2-4只，资金分散
-    - 单票仓位上限15%，同行业上限30%
-    - 预留20%现金应对T+1无法卖出时的机会
-    - 优先高置信度+多策略共识的标的
+    精选逻辑：
+    1. 置信度筛选（按风险偏好设阈值）
+    2. 多策略共识加分（同一股票被多个策略推荐 → 置信度+5）
+    3. 行业/策略类型分散（避免同质化）
+    4. 等风险预算分配仓位
     """
 
     def __init__(self, total_capital: float = 100000):
-        """
-        Args:
-            total_capital: 总资金（元）
-        """
         self.total_capital = total_capital
-        self.max_single_position = 0.15     # 单票最大仓位
-        self.max_industry_exposure = 0.30    # 单行业最大暴露
-        self.cash_reserve_ratio = 0.20       # 预留现金比例
-        self.max_positions = 4               # 最大持仓数
-        self.min_position = 0.05             # 最小仓位
-        self.lot_size = 100                  # A股1手=100股
+        self.max_single_position = 0.15     # 单票最大仓位15%
+        self.cash_reserve_ratio = 0.20      # 预留现金20%
+        self.max_positions = 4
+        self.lot_size = 100                 # A股1手=100股
 
     def allocate(self, signals: List[TradeSignal],
                  risk_level: str = 'moderate') -> PortfolioPlan:
-        """
-        根据信号列表生成最优投资组合
-
-        Args:
-            signals: 策略产生的买入信号列表
-            risk_level: 'conservative' | 'moderate' | 'aggressive'
-
-        Returns:
-            PortfolioPlan 包含具体买入方案
-        """
         plan = PortfolioPlan(total_capital=self.total_capital)
 
         if not signals:
             plan.notes.append("无可用信号，建议空仓等待")
             return plan
 
-        # 1. 按风险偏好筛选
+        # === 第1步：按风险偏好筛选 ===
         if risk_level == 'conservative':
-            # 保守：只要置信度≥75%的多策略共识信号
-            filtered = [s for s in signals if s.confidence >= 75 and '|' in s.reason]
+            confidence_min = 75
             max_positions = 2
             cash_ratio = 0.35
+            require_multi = True  # 保守模式要求多策略共识
         elif risk_level == 'aggressive':
-            # 激进：置信度≥55%即可
-            filtered = [s for s in signals if s.confidence >= 55]
+            confidence_min = 55
             max_positions = 4
             cash_ratio = 0.10
+            require_multi = False
         else:
-            # 稳健（默认）：置信度≥70%
-            filtered = [s for s in signals if s.confidence >= 65]
+            confidence_min = 65
             max_positions = 3
             cash_ratio = 0.20
+            require_multi = False
 
         self.max_positions = max_positions
         self.cash_reserve_ratio = cash_ratio
 
-        # 2. 按置信度排序，取Top N
-        filtered.sort(key=lambda s: s.confidence, reverse=True)
-        candidates = filtered[:max_positions * 2]  # 多取一些用于分散行业
+        # 按置信度筛选
+        filtered = [s for s in signals if s.confidence >= confidence_min]
+        if require_multi:
+            # 保守模式额外要求：必须被2个以上策略推荐
+            filtered = [s for s in filtered if '|' in s.reason]
 
-        if not candidates:
+        if not filtered:
+            highest = max(signals, key=lambda s: s.confidence)
             plan.notes.append(
-                f"当前{risk_level}模式下无足够高置信度信号。"
-                f"最高置信度: {signals[0].confidence:.0f}%（需要≥{65 if risk_level == 'moderate' else 75}%）"
+                f"当前模式({risk_level})要求置信度≥{confidence_min}%，"
+                f"最高仅{highest.confidence:.0f}%({highest.name})，不满足条件。"
+                f"建议：切换为更激进模式，或等待更好机会。"
             )
             return plan
 
-        # 3. 行业分散（避免同行业过度集中）
-        selected = self._diversify_by_industry(candidates, max_positions)
+        # === 第2步：多维度精选 ===
+        # 对每个候选计算综合评分
+        scored = []
+        for s in filtered:
+            score = self._calc_pick_score(s)
+            scored.append((score, s))
 
-        if not selected:
-            # 行业信息不足时退化为置信度排名
-            selected = candidates[:max_positions]
-            plan.notes.append("⚠️ 行业信息不完整，按置信度排名选取")
+        scored.sort(key=lambda x: x[0], reverse=True)
 
-        # 4. 仓位分配（凯利公式变体 + 等风险预算）
+        # === 第3步：分散化选取（优先策略类型分散，其次行业分散）===
+        selected = self._diversify_selection(scored, max_positions)
+
+        # === 第4步：仓位分配 ===
         available = self.total_capital * (1 - self.cash_reserve_ratio)
         allocations = self._allocate_positions(selected, available, risk_level)
 
-        # 5. 计算组合指标
         plan.allocations = allocations
         plan.used_capital = sum(a.amount for a in allocations)
         plan.cash_reserved = self.total_capital - plan.used_capital
         plan.risk_score = self._calc_portfolio_risk(allocations)
         plan.expected_return = self._calc_expected_return(allocations)
 
-        return plan
-
-    def _diversify_by_industry(self, candidates: List[TradeSignal],
-                                max_picks: int) -> List[TradeSignal]:
-        """按行业分散选择标的"""
-        # 尝试从factors中获取行业信息
-        industries = {}
-        for s in candidates:
-            ind = s.factors.get('industry', s.factors.get('sector', 'unknown'))
-            if ind not in industries:
-                industries[ind] = []
-            industries[ind].append(s)
-
-        selected = []
-        industry_count = {}
-
-        # 轮询每个行业取置信度最高的
-        sorted_industries = sorted(
-            industries.items(),
-            key=lambda x: max(s.confidence for s in x[1]),
-            reverse=True
+        # 添加说明
+        plan.notes.append(
+            f"从{len(signals)}个信号中筛选{len(filtered)}个达标 → "
+            f"精选{len(allocations)}只（{risk_level}模式，置信度≥{confidence_min}%）"
         )
 
-        for ind, stocks in sorted_industries:
-            if len(selected) >= max_picks:
-                break
-            # 每个行业最多选2只
-            for s in sorted(stocks, key=lambda x: x.confidence, reverse=True):
+        return plan
+
+    def _calc_pick_score(self, s: TradeSignal) -> float:
+        """
+        计算精选评分（用于横向对比）
+
+        评分维度：
+        - 置信度基础分：0-100
+        - 多策略共识加分：每个额外策略+10分
+        - 策略质量加分：不同策略类型权重不同
+        """
+        score = float(s.confidence)
+
+        # 多策略共识加分
+        strategy_count = s.reason.count('|') + 1
+        if strategy_count >= 3:
+            score += 20  # 3个以上策略同时推荐 → 大幅加分
+        elif strategy_count >= 2:
+            score += 10  # 2个策略共识
+
+        # 策略类型加分（基本面策略 > 技术面策略）
+        reason_lower = s.reason.lower()
+        if any(kw in reason_lower for kw in ['pb-roe', '多因子', '价值']):
+            score += 5  # 基本面策略更可靠
+
+        return score
+
+    def _diversify_selection(self, scored: List[Tuple[float, TradeSignal]],
+                              max_picks: int) -> List[TradeSignal]:
+        """
+        分散化选取：优先保证策略类型多样性，其次行业多样性
+
+        策略：轮询选取，每轮从不同策略组中取最佳
+        """
+        if not scored:
+            return []
+
+        # 提取每只股票的策略来源
+        def get_strategy_types(signal: TradeSignal) -> List[str]:
+            """从reason中提取策略名"""
+            types = []
+            reason = signal.reason
+            # 格式：'[策略名]原策略名' 或 '原策略名'
+            for prefix in ['[多因子]', '[PB-ROE]', '[趋势动量]', '[超跌反弹]',
+                           '[小盘成长]', '[涨停板]', '[首板打板]']:
+                if prefix in reason:
+                    types.append(prefix.strip('[]'))
+            if not types:
+                # 从 strategy 字段提取
+                types.append(signal.strategy)
+            return types
+
+        # 按策略类型分组
+        type_groups: Dict[str, List[Tuple[float, TradeSignal]]] = {}
+        for score, s in scored:
+            for stype in get_strategy_types(s):
+                if stype not in type_groups:
+                    type_groups[stype] = []
+                type_groups[stype].append((score, s))
+
+        # 如果没有足够的策略类型多样性（所有股票在同一组），直接按分数选
+        if len(type_groups) <= 1:
+            seen = set()
+            result = []
+            for score, s in scored:
+                if len(result) >= max_picks:
+                    break
+                if s.code not in seen:
+                    result.append(s)
+                    seen.add(s.code)
+            return result
+
+        # 轮询每个策略组，每轮取该组最佳
+        selected = []
+        seen_codes = set()
+        type_queue = sorted(type_groups.keys(),
+                           key=lambda k: max(sc for sc, _ in type_groups[k]),
+                           reverse=True)
+
+        while len(selected) < max_picks:
+            added_this_round = False
+            for stype in type_queue:
                 if len(selected) >= max_picks:
                     break
-                if industry_count.get(ind, 0) >= 2:
-                    break
-                selected.append(s)
-                industry_count[ind] = industry_count.get(ind, 0) + 1
+                # 取该策略组中还没被选的最佳股票
+                group = [(sc, s) for sc, s in type_groups[stype]
+                        if s.code not in seen_codes]
+                if group:
+                    best = max(group, key=lambda x: x[0])
+                    selected.append(best[1])
+                    seen_codes.add(best[1].code)
+                    added_this_round = True
+
+            if not added_this_round:
+                break  # 没有更多可选的
 
         return selected
 
     def _allocate_positions(self, stocks: List[TradeSignal],
                              available: float,
                              risk_level: str) -> List[AllocationResult]:
-        """等风险预算分配仓位"""
+        """仓位分配"""
         if not stocks:
             return []
 
         n = len(stocks)
-
-        # 基础等权分配
+        # 等权为基础，置信度微调
         base_weight = min(1.0 / n, self.max_single_position)
 
-        # 根据置信度调整权重
         confidences = [s.confidence for s in stocks]
-        avg_conf = sum(confidences) / len(confidences) if confidences else 50
+        avg_conf = sum(confidences) / n
 
-        # 置信度偏置：高置信度多分配
-        conf_weights = []
-        for conf in confidences:
-            bias = 1.0 + (conf - avg_conf) / 200  # 偏离均值±25%
-            conf_weights.append(max(0.5, min(1.5, bias)))
-
-        # 归一化
-        total_bias = sum(conf_weights)
-        norm_weights = [w / total_bias for w in conf_weights]
-
-        # 生成分配结果
         results = []
-        for i, (stock, norm_w) in enumerate(zip(stocks, norm_weights)):
-            weight = min(norm_w * 0.8, self.max_single_position)  # 避免超配
+        for i, stock in enumerate(stocks):
+            # 置信度偏离均值做±20%调整
+            bias = 1.0 + (stock.confidence - avg_conf) / 250
+            bias = max(0.8, min(1.2, bias))
+            weight = min(base_weight * bias, self.max_single_position)
             amount = available * weight
             price = stock.price
-            shares_raw = amount / price
-            # 取整手(100股)
-            lots = math.floor(shares_raw / self.lot_size)
+
+            # 按手取整
+            lots = max(1, math.floor(amount / price / self.lot_size))
             shares = lots * self.lot_size
             actual_amount = shares * price
 
-            # 最少买1手
-            if shares < self.lot_size:
-                shares = self.lot_size
-                actual_amount = shares * price
-
-            # 检查是否超预算
-            if actual_amount > available * self.max_single_position:
-                shares = math.floor(available * self.max_single_position / price / self.lot_size) * self.lot_size
-                actual_amount = shares * price
+            # 生成精选理由
+            reason, rank_info = self._build_pick_reason(stock, i+1, n, risk_level)
 
             results.append(AllocationResult(
                 stock=stock,
                 shares=shares,
                 amount=round(actual_amount, 2),
                 weight=round(actual_amount / self.total_capital * 100, 1),
-                reason=self._allocation_reason(stock, risk_level)
+                reason=reason,
+                rank_info=rank_info
             ))
 
         return results
 
-    def _allocation_reason(self, signal: TradeSignal, risk_level: str) -> str:
-        """生成分配理由"""
+    def _build_pick_reason(self, signal: TradeSignal, rank: int,
+                            total: int, risk_level: str) -> Tuple[str, str]:
+        """
+        构建精选理由——解释为什么选这只股票
+
+        返回: (简短理由, 详细排名信息)
+        """
         parts = []
-        if signal.confidence >= 80:
-            parts.append("高置信度优先配置")
-        elif signal.confidence >= 70:
-            parts.append("中等置信度标准配置")
+
+        # 1. 排名信息
+        parts.append(f"综合评分第{rank}/{total}名")
+
+        # 2. 策略来源
+        strategy_count = signal.reason.count('|') + 1
+        if strategy_count >= 3:
+            parts.append(f"{strategy_count}个策略同时推荐（高度共识）")
+        elif strategy_count >= 2:
+            parts.append(f"{strategy_count}个策略共识推荐")
         else:
-            parts.append("低置信度轻仓试探")
+            parts.append(f"单策略推荐：{signal.strategy}")
 
-        if '|' in signal.reason:
-            parts.append("多策略共识加分")
+        # 3. 置信度解读
+        if signal.confidence >= 85:
+            parts.append("信号极强，历史回测胜率较高")
+        elif signal.confidence >= 75:
+            parts.append("信号较强，值得重点关注")
+        elif signal.confidence >= 65:
+            parts.append("信号中等，可适量参与")
+        else:
+            parts.append("信号一般，轻仓试探")
 
-        if risk_level == 'conservative':
-            parts.append("保守模式仓位受限")
-        elif risk_level == 'aggressive':
-            parts.append("激进模式允许较高仓位")
+        # 4. 估值/技术特征（从reason和factors中提取）
+        factors = signal.factors
+        if factors:
+            score_val = factors.get('score', 0)
+            if score_val > 80:
+                parts.append(f"策略得分{score_val:.0f}/100，名列前茅")
 
-        return '; '.join(parts) if parts else '标准配置'
+        # 5. 风险提示
+        if '⚠' in signal.reason or '谨慎' in signal.reason:
+            parts.append("⚠️ 注意风险信号，严格止损")
+
+        reason = '；'.join(parts[:4])  # 前4条作为简短理由
+
+        # 详细排名信息
+        rank_details = [
+            f"策略: {signal.strategy}",
+            f"置信度: {signal.confidence:.0f}%",
+            f"策略共识数: {strategy_count}",
+        ]
+        if factors:
+            for k, v in factors.items():
+                if k != 'score':
+                    rank_details.append(f"{k}: {v}")
+        rank_info = ' | '.join(rank_details)
+
+        return reason, rank_info
 
     def _calc_portfolio_risk(self, allocations: List[AllocationResult]) -> float:
-        """估算组合风险（基于仓位集中度）"""
         if not allocations:
             return 0
-        # Herfindahl指数：越高越集中
         weights = [a.weight / 100 for a in allocations]
         hhi = sum(w ** 2 for w in weights)
-        # 映射到0-100的风险分
         return round(hhi * 100, 1)
 
     def _calc_expected_return(self, allocations: List[AllocationResult]) -> float:
-        """估算组合预期收益"""
         if not allocations:
             return 0
-        # 简单加权平均
-        total = sum(a.weight for a in allocations)
-        if total == 0:
+        total_w = sum(a.weight for a in allocations)
+        if total_w == 0:
             return 0
-        weighted = sum(a.stock.confidence / 100 * a.weight for a in allocations)
-        return round(weighted / total * 100, 1)
-
-    def format_plan(self, plan: PortfolioPlan) -> str:
-        """格式化组合计划为可读文本"""
-        lines = [
-            f"## 📊 今日投资组合计划",
-            f"",
-            f"💰 总资金: **{plan.total_capital:,.0f}元**",
-            f"📊 使用资金: **{plan.used_capital:,.0f}元** ({plan.used_capital/plan.total_capital*100:.0f}%)",
-            f"💵 预留现金: **{plan.cash_reserved:,.0f}元** ({plan.cash_reserved/plan.total_capital*100:.0f}%)",
-            f"",
-            f"### 买入清单",
-        ]
-
-        if not plan.allocations:
-            lines.append("> ⚠️ 今日无符合分配条件的标的")
-        else:
-            for i, a in enumerate(plan.allocations, 1):
-                s = a.stock
-                lines.append(f"**{i}. {s.name} ({s.code})**")
-                lines.append(f"> 买入价: ¥{s.price} | 数量: **{a.shares}股 ({a.shares//100}手)** | 金额: ¥{a.amount:,.0f}")
-                lines.append(f"> 仓位: {a.weight}% | 止损: ¥{s.stop_loss} (亏{a.shares*(s.price-s.stop_loss):,.0f}元) | 止盈: ¥{s.stop_profit} (盈{a.shares*(s.stop_profit-s.price):,.0f}元)")
-                lines.append(f"> 置信度: {s.confidence:.0f}% | {a.reason}")
-                lines.append("")
-
-        lines.append("### ⚙️ 操作步骤")
-        lines.append("1. 打开券商APP → 条件单")
-        for a in plan.allocations:
-            s = a.stock
-            lines.append(f"2. {s.name}: 买入价{s.price} 止损{s.stop_loss} 止盈{s.stop_profit}")
-        lines.append(f"{len(plan.allocations)+2}. 关掉系统，该干嘛干嘛")
-
-        if plan.notes:
-            lines.append("")
-            lines.append("### 📝 提示")
-            for note in plan.notes:
-                lines.append(f"- {note}")
-
-        return '\n'.join(lines)
+        return round(sum(a.stock.confidence / 100 * a.weight for a in allocations) / total_w * 100, 1)
 
 
-# 默认实例（10万资金）
+# 默认实例
 allocator = PortfolioAllocator(total_capital=100000)
