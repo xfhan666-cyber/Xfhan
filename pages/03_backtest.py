@@ -6,9 +6,10 @@ import pandas as pd
 from backtest.real_engine import real_engine
 
 STRATEGY_OPTIONS = {
-    'trend': '趋势动量 (MA均线交叉)',
-    'reversion': '超跌反弹 (均值回归)',
-    'both': '全部策略对比',
+    'trend': '趋势动量 — MA均线多头排列+放量突破',
+    'reversion': '超跌反弹 — 超跌缩量+均值回归',
+    'both': '趋势+超跌 对比回测',
+    'all': '全部3策略对比（含PB-ROE估算回测）',
 }
 
 POOL_OPTIONS = {
@@ -75,7 +76,9 @@ def show():
 
         rows = []
         for name, r in results.items():
-            strategy_label = {'trend': '趋势动量', 'reversion': '超跌反弹'}.get(name, name)
+            strategy_label = {
+                'trend': '趋势动量', 'reversion': '超跌反弹', 'pb_roe': 'PB-ROE价值'
+            }.get(name, name)
             rows.append({
                 '策略': strategy_label,
                 '累计收益(%)': r.get('total_return', 0),
@@ -120,7 +123,7 @@ def show():
         # 各策略详细指标
         st.subheader("📋 详细指标")
         for name, r in results.items():
-            label = {'trend': '趋势动量', 'reversion': '超跌反弹'}.get(name, name)
+            label = {'trend': '趋势动量', 'reversion': '超跌反弹', 'pb_roe': 'PB-ROE价值'}.get(name, name)
             with st.expander(
                 f"{label} | 累计收益: {r.get('total_return', 0)}% | "
                 f"夏普: {r.get('sharpe_ratio', 0)} | "

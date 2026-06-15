@@ -68,37 +68,36 @@ def get_market_data():
 
 
 def run_scan(market_data):
-    """运行全部7个策略"""
-    from strategies.multi_factor import MultiFactorStrategy
+    """运行3大核心策略（超跌反弹+趋势动量+PB-ROE价值）"""
     from strategies.pb_roe import PBROEStrategy
     from strategies.trend_momentum import TrendMomentumStrategy
     from strategies.mean_reversion import MeanReversionStrategy
-    from strategies.smallcap_growth import SmallCapGrowthStrategy
-    from strategies.first_board import FirstBoardStrategy
-    from strategies.limit_up import LimitUpStrategy
     from config import DEFAULT_STRATEGY_PARAMS
 
+    STRATEGY_LABELS = {
+        'mean_reversion': '超跌反弹',
+        'trend_momentum': '趋势动量',
+        'pb_roe': 'PB-ROE价值',
+    }
+
     strategies = [
-        ('多因子', MultiFactorStrategy(DEFAULT_STRATEGY_PARAMS.get('multi_factor'))),
-        ('PB-ROE', PBROEStrategy(DEFAULT_STRATEGY_PARAMS.get('pb_roe'))),
-        ('趋势动量', TrendMomentumStrategy(DEFAULT_STRATEGY_PARAMS.get('trend_momentum'))),
-        ('超跌反弹', MeanReversionStrategy(DEFAULT_STRATEGY_PARAMS.get('mean_reversion'))),
-        ('小盘成长', SmallCapGrowthStrategy(DEFAULT_STRATEGY_PARAMS.get('smallcap_growth'))),
-        ('涨停板', LimitUpStrategy(DEFAULT_STRATEGY_PARAMS.get('limit_up'))),
-        ('首板打板', FirstBoardStrategy(DEFAULT_STRATEGY_PARAMS.get('first_board'))),
+        ('mean_reversion', MeanReversionStrategy(DEFAULT_STRATEGY_PARAMS.get('mean_reversion'))),
+        ('trend_momentum', TrendMomentumStrategy(DEFAULT_STRATEGY_PARAMS.get('trend_momentum'))),
+        ('pb_roe', PBROEStrategy(DEFAULT_STRATEGY_PARAMS.get('pb_roe'))),
     ]
 
     all_signals = []
-    for label, s in strategies:
+    for key, s in strategies:
         try:
             s.set_market_data(market_data)
             r = s.run()
+            label = STRATEGY_LABELS.get(key, key)
             for sig in r.signals:
                 sig.strategy = f'[{label}]{sig.strategy}'
             all_signals.extend(r.signals)
             print(f"  {label}: {len(r.signals)}个信号")
         except Exception as e:
-            print(f"  {label}: 失败 - {e}")
+            print(f"  {key}: 失败 - {e}")
 
     # 合并同股票多策略信号
     merged = {}
@@ -106,7 +105,7 @@ def run_scan(market_data):
         if sig.code not in merged:
             merged[sig.code] = sig
         else:
-            merged[sig.code].confidence = min(98, merged[sig.code].confidence + 5)
+            merged[sig.code].confidence = min(95, merged[sig.code].confidence + 8)
             merged[sig.code].reason += ' | +' + sig.strategy
     return sorted(merged.values(), key=lambda x: x.confidence, reverse=True)
 
@@ -254,7 +253,7 @@ def main():
         market_note += " 🔴极端"
 
     # 2. 运行策略
-    print("2/4 运行7策略扫描...")
+    print("2/4 运行3大核心策略扫描...")
     signals = run_scan(market_data)
     print(f"   ✅ 共发现{len(signals)}个信号")
 

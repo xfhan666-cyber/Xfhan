@@ -64,43 +64,74 @@ if 'data_loaded' not in st.session_state:
     st.session_state.index_data = None
     st.session_state.overview = {}
 
-def run_all_strategies(market_data):
-    """运行全部7个策略，返回合并信号"""
-    from strategies.multi_factor import MultiFactorStrategy
+# ============ 三大核心策略（小资金·稳收益·可回测） ============
+CORE_STRATEGIES = {
+    'mean_reversion': {
+        'name': '🥇 超跌反弹（低吸）',
+        'desc': '跌多了就买，等反弹3-5%就走。胜率高，逻辑简单，每笔风险可控。',
+        'why': '适合你的小资金积小胜模式：快进快出，单笔止损仅-3%，不对抗市场趋势。',
+        'backtest': '✅ 完整回测，基于真实K线计算超跌+缩量信号',
+        'risk': '🟢 低风险',
+    },
+    'trend_momentum': {
+        'name': '🥈 趋势动量（趋势）',
+        'desc': '只做均线多头排列的上升趋势股，顺势而为，不逆势抄底。',
+        'why': 'A股趋势效应明显，顺势赚钱比抄底更稳。放量确认+均线支撑，持有周期3-10天。',
+        'backtest': '✅ 完整回测，基于真实K线计算MA均线交叉信号',
+        'risk': '🟡 中风险',
+    },
+    'pb_roe': {
+        'name': '🥉 PB-ROE价值（低吸）',
+        'desc': '买便宜的好公司：PB低于行业均值+ROE高的价值洼地，适合底仓中长期持有。',
+        'why': '低估值+高盈利=安全边际。可作为底仓配置，对冲超跌反弹和趋势策略的短期波动。',
+        'backtest': '⚠️ 部分回测（PE/PB数据为估算值，历史精度受限）',
+        'risk': '🟢 低风险',
+    },
+}
+
+
+def run_core_strategies(market_data):
+    """运行3个核心策略，返回合并信号。每个信号标注策略来源+触发逻辑。"""
     from strategies.pb_roe import PBROEStrategy
     from strategies.trend_momentum import TrendMomentumStrategy
     from strategies.mean_reversion import MeanReversionStrategy
-    from strategies.smallcap_growth import SmallCapGrowthStrategy
-    from strategies.first_board import FirstBoardStrategy
-    from strategies.limit_up import LimitUpStrategy
     from config import DEFAULT_STRATEGY_PARAMS
 
     strategies = [
-        MultiFactorStrategy(DEFAULT_STRATEGY_PARAMS.get('multi_factor')),
-        PBROEStrategy(DEFAULT_STRATEGY_PARAMS.get('pb_roe')),
-        TrendMomentumStrategy(DEFAULT_STRATEGY_PARAMS.get('trend_momentum')),
-        MeanReversionStrategy(DEFAULT_STRATEGY_PARAMS.get('mean_reversion')),
-        SmallCapGrowthStrategy(DEFAULT_STRATEGY_PARAMS.get('smallcap_growth')),
-        LimitUpStrategy(DEFAULT_STRATEGY_PARAMS.get('limit_up')),
-        FirstBoardStrategy(DEFAULT_STRATEGY_PARAMS.get('first_board')),
+        ('mean_reversion', MeanReversionStrategy(DEFAULT_STRATEGY_PARAMS.get('mean_reversion'))),
+        ('trend_momentum', TrendMomentumStrategy(DEFAULT_STRATEGY_PARAMS.get('trend_momentum'))),
+        ('pb_roe', PBROEStrategy(DEFAULT_STRATEGY_PARAMS.get('pb_roe'))),
     ]
+
     all_signals = []
-    for s in strategies:
+    for key, s in strategies:
         try:
             s.set_market_data(market_data)
             result = s.run()
+            # 给每个信号打上策略key标记
+            for sig in result.signals:
+                sig.strategy = CORE_STRATEGIES[key]['name']
+                sig.factors['strategy_key'] = key
+                sig.factors['strategy_why'] = CORE_STRATEGIES[key]['why']
+                sig.factors['backtest_level'] = CORE_STRATEGIES[key]['backtest']
+                sig.factors['risk_level'] = CORE_STRATEGIES[key]['risk']
             all_signals.extend(result.signals)
         except Exception:
             pass
 
-    # 合并同股票信号（多策略共识提升置信度）
+    # 合并同股票信号（多策略共识大幅提升置信度）
     merged = {}
     for sig in all_signals:
         if sig.code not in merged:
             merged[sig.code] = sig
         else:
-            merged[sig.code].confidence = min(98, merged[sig.code].confidence + 5)
-            merged[sig.code].reason += f' | +{sig.strategy}'
+            # 多策略共识：置信度+8，合并策略名
+            merged[sig.code].confidence = min(95, merged[sig.code].confidence + 8)
+            if sig.strategy not in merged[sig.code].reason:
+                merged[sig.code].reason += f' | +{sig.strategy}'
+            # 合并factors中的策略标记
+            merged[sig.code].factors['consensus'] = merged[sig.code].factors.get('consensus', 1) + 1
+
     result = sorted(merged.values(), key=lambda x: x.confidence, reverse=True)
     return result
 
@@ -158,8 +189,8 @@ with t1:
             st.error("❌ 数据获取失败，请检查网络后点击刷新重试")
         else:
             # Step 2: 运行策略
-            with st.spinner("🔍 正在运行7个策略分析全市场，大约需要30秒..."):
-                signals = run_all_strategies(market_df)
+            with st.spinner("🔍 正在运行3大核心策略分析全市场..."):
+                signals = run_core_strategies(market_df)
 
             if not signals:
                 st.warning("今日无符合条件的买入信号。当前市场环境不适合出击，空仓也是策略。")
@@ -169,7 +200,19 @@ with t1:
                 allocator = PortfolioAllocator(total_capital=total_capital)
                 plan = allocator.allocate(signals, risk_level=risk_level)
 
-                st.success(f"扫描完成！共 {len(signals)} 个信号 → 精选 {len(plan.allocations)} 只")
+                st.success(f"扫描完成！3大策略共发现 {len(signals)} 个信号 → 精选 {len(plan.allocations)} 只")
+
+                # 显示使用的策略信息
+                with st.expander("📊 本次扫描使用的策略及依据", expanded=False):
+                    for key, info in CORE_STRATEGIES.items():
+                        st.markdown(f"""
+                        **{info['name']}**
+                        - 📖 策略逻辑：{info['desc']}
+                        - 🎯 为什么适合你：{info['why']}
+                        - 📈 回测支持：{info['backtest']}
+                        - ⚠️ 风险等级：{info['risk']}
+                        ---
+                        """)
 
                 if plan.allocations:
                     st.subheader("📋 今日买入清单")
@@ -179,6 +222,8 @@ with t1:
                         profit_amount = a.shares * (s.stop_profit - s.price)
                         strategy_count = s.reason.count('|') + 1
                         consensus_badge = f'🏅{strategy_count}策略共识' if strategy_count >= 2 else '单策略'
+                        strat_key = s.factors.get('strategy_key', '')
+                        risk_badge = s.factors.get('risk_level', '')
                         st.markdown(f"""<div class="signal-row">
                             <div style="display:flex;justify-content:space-between;align-items:center">
                                 <span>
@@ -186,6 +231,8 @@ with t1:
                                     <span style="color:#94a3b8;font-size:0.9rem"> {s.code}</span>
                                     <span style="color:#fbbf24;font-size:0.8rem;margin-left:8px">🔥{s.confidence:.0f}%</span>
                                     <span style="color:#10b981;font-size:0.75rem;margin-left:4px"> {consensus_badge}</span>
+                                    <span style="background:#1e40af;color:#93c5fd;font-size:0.7rem;padding:2px 6px;border-radius:4px;margin-left:4px">{strat_key}</span>
+                                    <span style="font-size:0.7rem;margin-left:4px">{risk_badge}</span>
                                 </span>
                             </div>
                             <div style="margin-top:6px;font-size:0.85rem;color:#cbd5e1;display:flex;gap:20px;flex-wrap:wrap">
@@ -199,7 +246,7 @@ with t1:
                             </div>
                             <div style="font-size:0.82rem;color:#fbbf24;margin-top:4px">🎯 精选理由: {a.reason}</div>
                             <div style="font-size:0.75rem;color:#64748b;margin-top:1px">📊 {a.rank_info}</div>
-                            <div style="font-size:0.75rem;color:#94a3b8;margin-top:1px">📝 策略详情: {s.reason[:100]}</div>
+                            <div style="font-size:0.75rem;color:#94a3b8;margin-top:1px">📝 触发条件: {s.reason[:100]}</div>
                         </div>""", unsafe_allow_html=True)
 
                     st.divider()
